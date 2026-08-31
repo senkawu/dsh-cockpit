@@ -1,0 +1,36 @@
+[package]
+name = "dsh-cockpit"
+version = "0.2.0"
+description = "DSH-Cockpit 桌面客户端（Tauri 2 外壳 + dsh 内核解耦，node/npm sidecar）"
+authors = ["noke"]
+edition = "2021"
+
+# 产物名（Windows exe 名、macOS 二进制名）
+[[bin]]
+name = "dsh-cockpit"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri-plugin-shell = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-log = "2"
+tauri-plugin-updater = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+semver = "1"
+regex = "1"
+log = "0.4"
+thiserror = "2"
+tokio = { version = "1", features = ["time", "net", "macros", "rt-multi-thread", "sync"] }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"

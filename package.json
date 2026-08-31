@@ -1,0 +1,15 @@
+{
+  "name": "dsh-cockpit",
+  "version": "0.2.0",
+  "private": true,
+  "description": "deepseek harness 桌面客户端（Tauri 2 外壳 + dsh 内核解耦）",
+  "scripts": {
+    "tauri": "tauri",
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "build:debug": "tauri build --debug --no-bundle"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

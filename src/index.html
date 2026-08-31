@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>DSH-Cockpit · 控制面板</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <main class="panel">
+    <h1>DSH-Cockpit <span id="app-version" class="ver"></span></h1>
+    <p class="sub">外壳与 DSH 内核解耦 · 隔离 pnpm 环境</p>
+    <div id="safe-banner" class="safe-banner" hidden>⚠ 安全模式运行中（第三方插件已停用）
+      <button id="btn-exit-safe" class="mini">退出安全模式并重启</button>
+    </div>
+
+    <section>
+      <h2>DSH 内核</h2>
+      <div class="row"><span>已安装版本</span><b id="installed">—</b></div>
+      <div class="row"><span>最新版本</span><b id="latest">—</b></div>
+      <div class="row"><span>服务状态</span><b id="running">—</b></div>
+      <div class="row"><span>端口</span><b id="port">—</b></div>
+      <div class="actions">
+        <button id="btn-check">检查 DSH 更新</button>
+        <button id="btn-update" disabled>立即更新</button>
+        <button id="btn-restart">重启 dsh 服务</button>
+      </div>
+      <div id="update-result" class="hint"></div>
+    </section>
+
+    <section>
+      <h2>设置</h2>
+      <label class="row switch">
+        <span>启动时自动检查 DSH 更新</span>
+        <input type="checkbox" id="auto-check" />
+      </label>
+      <div class="row"><span>npm registry</span><b id="registry">—</b></div>
+    </section>
+
+    <section>
+      <h2>插件</h2>
+      <div id="plugin-list" class="rows"></div>
+      <div id="plugin-hint" class="hint"></div>
+    </section>
+
+    <section>
+      <h2>外壳（Tauri）</h2>
+      <div class="actions">
+        <button id="btn-shell-update">检查外壳更新</button>
+      </div>
+      <div id="shell-result" class="hint"></div>
+    </section>
+
+    <section class="paths">
+      <div class="row"><span>隔离 npm 环境</span><code id="envDir">—</code></div>
+      <div class="row"><span>DSH_HOME</span><code id="homeDir">—</code></div>
+      <div class="row"><span>日志目录</span><code id="logDir">—</code></div>
+    </section>
+
+    <footer>
+      <button id="btn-quit" class="danger">完全退出</button>
+    </footer>
+  </main>
+  <script src="panel.js"></script>
+</body>
+</html>

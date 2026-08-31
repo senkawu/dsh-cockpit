@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>DSH-Cockpit</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="status-body">
+  <main class="status">
+    <div class="logo">🐋</div>
+    <h1>DSH-Cockpit</h1>
+    <p class="sub">正在准备 DSH 运行环境…</p>
+
+    <!-- 进度条 -->
+    <div class="progress-track">
+      <div id="bar" class="progress-bar"></div>
+    </div>
+    <div class="progress-meta">
+      <span id="phase">初始化…</span>
+      <span id="percent">0%</span>
+    </div>
+    <div id="detail" class="detail"></div>
+
+    <!-- 查看日志（点击展开） -->
+    <div class="log-toggle">
+      <button id="btn-log">查看日志</button>
+      <pre id="log" class="log-panel" hidden></pre>
+    </div>
+  </main>
+  <script src="status.js"></script>
+</body>
+</html>

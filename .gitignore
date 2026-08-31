@@ -1,0 +1,8 @@
+node_modules/
+src-tauri/target/
+src-tauri/binaries/
+src-tauri/npm/
+src-tauri/pnpm/
+src-tauri/.node-build/
+*.log
+.DS_Store
