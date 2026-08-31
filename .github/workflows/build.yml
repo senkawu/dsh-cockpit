@@ -15,6 +15,7 @@ jobs:
   mac-arm64:
     name: macOS Apple Silicon (dmg)
     runs-on: macos-14 # arm64 runner
+    continue-on-error: true # macOS 运行器可能长时间排队，失败/排队不阻塞发布与其他平台
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -32,6 +33,7 @@ jobs:
   mac-x64:
     name: macOS Intel (dmg)
     runs-on: macos-13 # x64 runner
+    continue-on-error: true # macOS 运行器可能长时间排队，失败/排队不阻塞发布与其他平台
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -126,7 +128,8 @@ jobs:
   release:
     name: 📦 发布 GitHub Release
     runs-on: ubuntu-latest
-    needs: [mac-arm64, mac-x64, win-x64, win-arm64, linux-deb, linux-rpm]
+    # 只依赖非 mac 核心任务（mac 排队/失败不阻塞发布）；产物按实际存在收集
+    needs: [win-x64, win-arm64, linux-deb, linux-rpm]
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
@@ -144,12 +147,15 @@ jobs:
             echo "::notice::Release $VERSION 已存在，跳过创建"
             exit 0
           fi
-          # 打标签（若不存在则指向当前提交）并上传全部安装包。
+          # 收集实际构建成功的安装包（mac 未就绪时只发已有平台）
+          FILES=$(find artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.deb' -o -name '*.rpm' \))
+          echo "待上传: $FILES"
+          # 打标签（若不存在则指向当前提交）并上传。
           # 注意：--notes 与 --generate-notes 互斥，只用自动生成。
           git tag "$VERSION" || true
           git push origin "$VERSION" || true
-          gh release create "$VERSION" \
-            artifacts/*/*.dmg artifacts/*/*.exe artifacts/*/*.deb artifacts/*/*.rpm \
+          # shellcheck disable=SC2086
+          gh release create "$VERSION" $FILES \
             --repo "$GITHUB_REPOSITORY" \
             --title "DSH-Cockpit $VERSION" \
             --generate-notes
