@@ -32,6 +32,8 @@ const PNPM_VERSION = process.env.DSH_PNPM_VERSION || '11.24.0';
 const PNPM_REGISTRY = (process.env.DSH_REGISTRY || 'https://registry.npmmirror.com').replace(/\/$/, '');
 
 function triple() {
+  // 目标 triple：优先显式覆盖（Windows arm64 交叉构建等场景），否则按宿主推断
+  if (process.env.DSH_TARGET_TRIPLE) return process.env.DSH_TARGET_TRIPLE;
   const map = {
     'darwin-arm64': 'aarch64-apple-darwin',
     'darwin-x64': 'x86_64-apple-darwin',
@@ -42,8 +44,19 @@ function triple() {
   };
   const key = `${process.platform}-${process.arch}`;
   const t = map[key];
-  if (!t) throw new Error(`不支持的构建平台: ${key}（macOS/Windows 在本机构建；Linux 需在 Linux 机器上构建 deb/rpm）`);
+  if (!t) throw new Error(`不支持的构建平台: ${key}（可设 DSH_TARGET_TRIPLE 指定目标）`);
   return t;
+}
+
+/** 目标平台/架构（用于 Node 发行包目录名，可被 DSH_TARGET_PLATFORM/ARCH 覆盖）。
+ *  注意：Node 官方发行包 Windows 目录名是 `win-x64` 而非 `win32-x64`。 */
+function targetPlatformArch() {
+  let platform = process.env.DSH_TARGET_PLATFORM;
+  if (!platform) {
+    platform = process.platform === 'win32' ? 'win' : process.platform;
+  }
+  const arch = process.env.DSH_TARGET_ARCH || process.arch;
+  return { platform, arch };
 }
 
 function download(url, dest) {
@@ -96,7 +109,7 @@ function copyDir(src, dest) {
 
 async function main() {
   const t = triple();
-  const isWin = process.platform === 'win32';
+  const isWin = t.includes('windows'); // 目标平台是否为 Windows（决定 zip/解压/node.exe）
   const nodeSidecar = path.join(BIN_DIR, `node-${t}${isWin ? '.exe' : ''}`);
 
   // 幂等检查：sidecar 与 npm/pnpm 资源都在且版本一致 → 跳过
@@ -108,7 +121,8 @@ async function main() {
     return;
   }
 
-  const distDir = `node-${VERSION}-${process.platform}-${process.arch}`;
+  const { platform: distPlatform, arch: distArch } = targetPlatformArch();
+  const distDir = `node-${VERSION}-${distPlatform}-${distArch}`;
   const archive = `${distDir}${isWin ? '.zip' : '.tar.gz'}`;
   const url = `${MIRROR}/${VERSION}/${archive}`;
   const work = path.join(SRC_TAURI, '.node-build');

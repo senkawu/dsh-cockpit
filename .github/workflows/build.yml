@@ -75,7 +75,12 @@ jobs:
         with: { node-version: 22 }
       - run: npm install
       - run: npx tauri build --target aarch64-pc-windows-msvc --bundles nsis
-        env: { DSH_NODE_MIRROR: "https://cdn.npmmirror.com/binaries/node", DSH_REGISTRY: "https://registry.npmmirror.com" }
+        env:
+          DSH_TARGET_TRIPLE: aarch64-pc-windows-msvc
+          DSH_TARGET_PLATFORM: win
+          DSH_TARGET_ARCH: arm64
+          DSH_NODE_MIRROR: "https://cdn.npmmirror.com/binaries/node"
+          DSH_REGISTRY: "https://registry.npmmirror.com"
       - uses: actions/upload-artifact@v4
         with:
           name: windows-arm64
