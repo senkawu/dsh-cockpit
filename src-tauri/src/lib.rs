@@ -555,7 +555,10 @@ pub fn run() {
 
     app.run(|handle, event| {
         match event {
-            // macOS：点击 Dock 图标重新激活（窗口被隐藏/销毁后点 Dock 应能重新打开）
+            // macOS：点击 Dock 图标重新激活（窗口被隐藏/销毁后点 Dock 应能重新打开）。
+            // 注意：Reopen 是 macOS 专属事件，Windows/Linux 的 RunEvent 没有该变体，
+            // 必须用属性 cfg 包裹，否则交叉编译失败。
+            #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => show_or_recreate_main(handle),
             tauri::RunEvent::Exit => {
                 if let Some(m) = handle.try_state::<DshManager>() {

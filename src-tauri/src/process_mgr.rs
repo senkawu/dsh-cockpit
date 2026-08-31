@@ -77,10 +77,15 @@ pub fn ensure_node_launcher(app: &AppHandle) -> Result<PathBuf, String> {
     let node = sidecar_node_path()?;
     let link = bin_dir.join(if cfg!(windows) { "node.cmd" } else { "node" });
     if !link.exists() {
-        if cfg!(windows) {
+        // 注意：必须用属性 cfg 而非 if cfg!(…)，否则两个分支都会编译，
+        // Windows 上会因 std::os::unix 不存在而编译失败。
+        #[cfg(windows)]
+        {
             std::fs::write(&link, format!("@echo off\r\n\"{}\" %*\r\n", node.display()))
                 .map_err(|e| e.to_string())?;
-        } else {
+        }
+        #[cfg(not(windows))]
+        {
             std::os::unix::fs::symlink(&node, &link).map_err(|e| e.to_string())?;
         }
     }
@@ -214,7 +219,8 @@ async fn http_probe(port: u16) -> bool {
 /// 优雅停止：先 SIGTERM（unix 用 kill 命令，win 用 node process.kill），
 /// 等 3 秒后仍未退出再强杀（插件 kill 在 unix 上是 SIGKILL）。
 /// 注意：CommandChild::kill(self) 会消费掉 child，因此这里接收所有权。
-pub async fn graceful_stop(_app: &AppHandle, proc: DshProcess) -> Result<(), String> {
+#[allow(unused_variables)]
+pub async fn graceful_stop(app: &AppHandle, proc: DshProcess) -> Result<(), String> {
     let pid = proc.pid;
     #[cfg(unix)]
     {
