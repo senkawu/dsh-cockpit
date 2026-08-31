@@ -1,7 +1,7 @@
 //! 前端可调用的 IPC 命令（控制面板 UI ↔ Rust 后端）
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
 use crate::dsh::DshManager;
 

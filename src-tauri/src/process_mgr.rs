@@ -214,7 +214,7 @@ async fn http_probe(port: u16) -> bool {
 /// 优雅停止：先 SIGTERM（unix 用 kill 命令，win 用 node process.kill），
 /// 等 3 秒后仍未退出再强杀（插件 kill 在 unix 上是 SIGKILL）。
 /// 注意：CommandChild::kill(self) 会消费掉 child，因此这里接收所有权。
-pub async fn graceful_stop(app: &AppHandle, proc: DshProcess) -> Result<(), String> {
+pub async fn graceful_stop(_app: &AppHandle, proc: DshProcess) -> Result<(), String> {
     let pid = proc.pid;
     #[cfg(unix)]
     {

@@ -23,14 +23,14 @@ mod settings;
 mod tray;
 
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use dsh::DshManager;
 use log::{error, info, warn};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::webview::NewWindowResponse;
-use tauri::{Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+use tauri::{Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogResult};
 use tauri_plugin_log::{Target, TargetKind};
 
@@ -85,10 +85,7 @@ const BLOCK_CONTEXT_MENU_JS: &str = r#"
   })();
 "#;
 
-fn create_main_window(
-    app: &tauri::AppHandle,
-    recovery: &Arc<Mutex<WindowRecovery>>,
-) -> Result<WebviewWindow, Box<dyn std::error::Error>> {
+fn create_main_window(app: &tauri::AppHandle) -> Result<WebviewWindow, Box<dyn std::error::Error>> {
     let app_for_nav = app.clone();
     let win = WebviewWindowBuilder::new(app, "main", WebviewUrl::App("status.html".into()))
         .title("DSH-Cockpit")
@@ -125,12 +122,11 @@ fn create_main_window(
     // 销毁（崩溃/异常关闭）→ 按冷却与次数上限自动重建
     {
         let app2 = app.clone();
-        let recovery2 = recovery.clone();
-        let label = win.label().to_string();
         win.on_window_event(move |event| {
             if let WindowEvent::Destroyed = event {
                 let now = now_millis();
-                let mut st = recovery2.lock().unwrap();
+                let recovery_state = app2.state::<Mutex<WindowRecovery>>();
+                let mut st = recovery_state.lock().unwrap();
                 if st.reload_count >= WINDOW_RECOVERY_MAX_RELOADS {
                     warn!("主窗口恢复次数已达上限，停止自动重建");
                     return;
@@ -140,13 +136,12 @@ fn create_main_window(
                 }
                 st.reload_count += 1;
                 st.last_reload_at = now;
+                drop(st);
                 let app3 = app2.clone();
-                let recovery3 = recovery2.clone();
-                let _label = label.clone();
                 tauri::async_runtime::spawn(async move {
                     // 延迟一点再重建，避免销毁尚未完成
                     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                    if let Err(e) = create_main_window(&app3, &recovery3) {
+                    if let Err(e) = create_main_window(&app3) {
                         error!("重建主窗口失败: {e}");
                         return;
                     }
@@ -160,6 +155,18 @@ fn create_main_window(
         });
     }
     Ok(win)
+}
+
+/// 显示（或按需重建）主窗口：托盘「显示窗口」、Dock 图标点击、单实例二次启动都走这里。
+/// 窗口只是被隐藏 → show/focus；已被销毁 → 按恢复策略重建。
+pub fn show_or_recreate_main(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    } else if let Err(e) = create_main_window(app) {
+        error!("重建主窗口失败: {e}");
+    }
 }
 
 fn create_panel_window(app: &tauri::AppHandle) -> Result<WebviewWindow, Box<dyn std::error::Error>> {
@@ -496,8 +503,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .build(&handle)?;
 
     // 程序化建窗（导航守卫 / 新窗口拦截 / 关闭到托盘 / 销毁恢复）
-    let recovery = Arc::new(Mutex::new(WindowRecovery::default()));
-    create_main_window(&handle, &recovery)?;
+    handle.manage(Mutex::new(WindowRecovery::default()));
+    create_main_window(&handle)?;
     create_panel_window(&handle)?;
 
     // 后台引导
@@ -546,11 +553,16 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    app.run(|_app_handle, event| {
-        if let tauri::RunEvent::Exit = event {
-            if let Some(m) = _app_handle.try_state::<DshManager>() {
-                let _ = m.inner().kill_managed_now();
+    app.run(|handle, event| {
+        match event {
+            // macOS：点击 Dock 图标重新激活（窗口被隐藏/销毁后点 Dock 应能重新打开）
+            tauri::RunEvent::Reopen { .. } => show_or_recreate_main(handle),
+            tauri::RunEvent::Exit => {
+                if let Some(m) = handle.try_state::<DshManager>() {
+                    let _ = m.inner().kill_managed_now();
+                }
             }
+            _ => {}
         }
     });
 }

@@ -176,6 +176,13 @@ rpm 另需 `rpm-build`）。sidecar（node）与 npm/pnpm 资源由 `beforeBuild
 RedHat（rpm）** 六个安装包，在每次运行的 Artifacts 里下载。Windows/Linux 的包
 必须在对应平台构建（Tauri 平台限制），本工作流即"一站式"解决方案。
 
+## Contributors / 致谢
+
+- **[DeepSeek Harness](https://github.com/deepseek-ai)**（[@deepseek-ai](https://github.com/deepseek-ai)）：
+  本客户端所驱动的 DSH 内核（`@deepseek-ai/dsh`）及其运行时生态全部来自该组织。
+- [dataelement/dsh-desktop](https://github.com/dataelement/dsh-desktop)：参考其桌面宿主设计（环境注入/更新策略/安全模式/窗口恢复/补丁层安全写入等）。
+- 内置插件作者：[dsh-market](https://github.com/dsh-market/dsh-market)、[MeteorNOX/DeepSeek-Balance-Whale-Widget](https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget)、[HaoyueQin/dsh-usage-statistics-panel](https://github.com/HaoyueQin/dsh-usage-statistics-panel)。
+
 ## 已知风险
 
 1. **dsh 上游 breaking change**：dsh 大版本升级可能改变 CLI 参数/端口/存储格式。
