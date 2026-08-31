@@ -90,6 +90,11 @@ impl DshManager {
     /// 由应用数据目录构造管理器（目录不存在则创建）
     pub fn new(app: &AppHandle) -> Result<Self, Box<dyn std::error::Error>> {
         let data_dir = app.path().app_data_dir()?;
+
+        // 迁移旧版（更名前 com.deepseek.dsh.desktop）数据：插件/会话/凭据/缓存一次性搬过来，
+        // 否则改 identifier 后旧目录被"遗弃"，用户会发现插件不见了。
+        migrate_legacy_data(&data_dir);
+
         let env_dir = data_dir.join("dsh-env");
         let home_dir = data_dir.join("dsh-home");
         let cache_dir = data_dir.join("npm-cache");
@@ -959,7 +964,36 @@ fn merge_env_output(target: &mut std::collections::HashMap<String, String>, outp
     }
 }
 
-/// 递归复制目录（备份用）
+/// 迁移旧版应用数据（更名前的 identifier：com.deepseek.dsh.desktop）。
+/// 仅当新数据目录不存在/为空、且旧目录存在时执行，把插件/会话/凭据/缓存整体搬过来。
+fn migrate_legacy_data(new_dir: &Path) {
+    if new_dir.exists() && std::fs::read_dir(new_dir).map(|mut d| d.next().is_some()).unwrap_or(true) {
+        return; // 新目录已有数据，不迁移
+    }
+    let legacy = match new_dir.parent() {
+        Some(p) => p.join("com.deepseek.dsh.desktop"),
+        None => return,
+    };
+    if !legacy.exists() {
+        return;
+    }
+    log::info!("检测到旧版数据目录，正在迁移: {:?} → {:?}", legacy, new_dir);
+    let _ = std::fs::create_dir_all(new_dir);
+    for entry in std::fs::read_dir(&legacy).ok().into_iter().flatten().flatten() {
+        let from = entry.path();
+        let to = new_dir.join(entry.file_name());
+        if from.is_dir() {
+            if let Err(e) = copy_dir_recursive(&from, &to) {
+                log::warn!("迁移目录失败 {:?}: {e}", from);
+            }
+        } else if let Err(e) = std::fs::copy(&from, &to) {
+            log::warn!("迁移文件失败 {:?}: {e}", from);
+        }
+    }
+    log::info!("旧版数据迁移完成（插件/会话/凭据已保留）");
+}
+
+/// 递归复制目录（备份/迁移用）
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {

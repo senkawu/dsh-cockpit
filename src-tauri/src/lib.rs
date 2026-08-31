@@ -205,35 +205,38 @@ fn jitter_ms() -> u64 {
     n % UPDATE_STARTUP_JITTER_MS
 }
 
-/// 检查并弹窗询问（manual=true 时忽略“跳过此版本”）
+/// 检查并提示（manual=true 时忽略“跳过此版本”，且给出可见弹窗反馈）
 async fn check_and_prompt(app: &tauri::AppHandle, manager: &DshManager, manual: bool) {
     let latest = match manager.latest_version(app).await {
         Ok(v) => v,
         Err(e) => {
             if manual {
-                let _ = app.emit(
-                    "dsh-update-result",
-                    format!("检查失败（网络/registry 异常）: {e}"),
-                );
+                use tauri_plugin_dialog::DialogExt;
+                app.dialog()
+                    .message(format!("无法查询 npm 最新版本：{e}\n（请检查网络/registry）"))
+                    .title("检查 DSH 更新")
+                    .kind(tauri_plugin_dialog::MessageDialogKind::Error)
+                    .show_with_result(|_| {});
             }
-            warn!("自动检查 DSH 更新失败: {e}");
+            warn!("检查 DSH 更新失败: {e}");
             return;
         }
     };
     if !manager.has_update(&latest, manual) {
         info!("DSH 内核已是最新（{latest}）");
         if manual {
-            let _ = app.emit("dsh-update-result", format!("已是最新版本（{latest}）"));
+            use tauri_plugin_dialog::DialogExt;
+            app.dialog()
+                .message(format!("DSH 内核已是最新版本（{latest}）"))
+                .title("检查 DSH 更新")
+                .kind(tauri_plugin_dialog::MessageDialogKind::Info)
+                .show_with_result(|_| {});
         }
         return;
     }
     info!("检测到 dsh 新版本: {latest}");
     manager.emit_status(app, "update-available", &format!("发现 dsh 新版本 {latest}"), Some(&latest));
-    if manual {
-        let _ = app.emit("dsh-update-result", format!("发现新版本 {latest}（可在面板点“立即更新”）"));
-        return;
-    }
-    // 自动检查命中 → 三按钮：立即更新 / 跳过此版本 / 稍后
+    // 三按钮：立即更新 / 跳过此版本 / 稍后（自动与手动检查共用）
     let app2 = app.clone();
     let manager2 = manager.clone();
     let current = manager.installed_version().unwrap_or_default();
@@ -346,6 +349,86 @@ async fn bootstrap(app: tauri::AppHandle) {
     spawn_update_checker(&app, &manager);
 }
 
+/// 以带参数的形态重启自身（安全模式开关）
+fn relaunch_with_flag(app: &tauri::AppHandle, flag: &str) {
+    let exe = std::env::current_exe().ok();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if !args.iter().any(|a| a == flag) {
+        args.push(flag.to_string());
+    }
+    if let Some(exe) = exe {
+        let _ = std::process::Command::new(exe).args(&args).spawn();
+    }
+    app.exit(0);
+}
+
+/// 原生应用菜单：把借鉴自 dataelement/dsh-desktop 的能力做成可见入口
+/// （关于 / 检查更新 / 重启服务 / 安全模式重启 / 打开日志目录 / 控制面板）
+fn build_app_menu(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+
+    let about = MenuItem::with_id(app, "about", "关于 DSH-Cockpit", true, None::<&str>)?;
+    let check = MenuItem::with_id(app, "check-update", "检查 DSH 更新", true, None::<&str>)?;
+    let restart = MenuItem::with_id(app, "restart-dsh", "重启 dsh 服务", true, None::<&str>)?;
+    let safe = MenuItem::with_id(app, "safe-restart", "以安全模式重启", true, None::<&str>)?;
+    let logs = MenuItem::with_id(app, "open-logs", "打开日志目录", true, None::<&str>)?;
+    let panel = MenuItem::with_id(app, "panel", "控制面板", true, None::<&str>)?;
+    let quit = PredefinedMenuItem::quit(app, Some("退出"))?;
+
+    let app_menu = Submenu::with_items(app, "DSH-Cockpit", true, &[&about, &quit])?;
+    let dsh_menu = Submenu::with_items(app, "DSH", true, &[&check, &restart, &safe, &logs, &panel])?;
+    let menu = Menu::with_items(app, &[&app_menu, &dsh_menu])?;
+    app.set_menu(menu)?;
+
+    app.on_menu_event(|app, event| match event.id().as_ref() {
+        "about" => {
+            use tauri_plugin_dialog::DialogExt;
+            let m = app.state::<DshManager>().inner();
+            let detail = format!(
+                "外壳版本：{}\nDSH 内核：{}\n端口：{}\n\n隔离环境：{}\nDSH_HOME：{}\n\n安全模式：{}",
+                app.package_info().version,
+                m.installed_version().unwrap_or_else(|| "未安装".into()),
+                m.port,
+                m.env_dir.display(),
+                m.active_home().display(),
+                if m.safe_mode.load(Ordering::Relaxed) { "开" } else { "关" },
+            );
+            app.dialog()
+                .message(format!(
+                    "DSH-Cockpit — DeepSeek Harness 桌面外壳\n外壳与 dsh 内核解耦，dsh 随 npm 更新\n\n{detail}"
+                ))
+                .title("关于 DSH-Cockpit")
+                .kind(tauri_plugin_dialog::MessageDialogKind::Info)
+                .show_with_result(|_| {});
+        }
+        "check-update" => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let m = app.state::<DshManager>().inner().clone();
+                check_and_prompt(&app, &m, true).await;
+            });
+        }
+        "restart-dsh" => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let m = app.state::<DshManager>().inner().clone();
+                let _ = m.stop(&app).await;
+                if let Err(e) = m.start(&app).await {
+                    error!("重启 dsh 失败: {e}");
+                }
+            });
+        }
+        "safe-restart" => relaunch_with_flag(app, "--safe-mode"),
+        "open-logs" => {
+            let m = app.state::<DshManager>().inner();
+            crate::tray::open_external(&m.log_dir.to_string_lossy());
+        }
+        "panel" => tray::show_panel(app),
+        _ => {}
+    });
+    Ok(())
+}
+
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
 
@@ -362,6 +445,9 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         manager.env_dir.display()
     );
     info!("DSH_HOME: {}", manager.active_home().display());
+
+    // 原生菜单（关于 / 检查更新 / 重启 / 安全模式重启 / 日志 / 控制面板）
+    build_app_menu(&handle)?;
 
     // 托盘（显示窗口 / 控制面板 / 重启 dsh / 完全退出）
     let show_item = MenuItem::with_id(&handle, "show", "显示窗口", true, None::<&str>)?;
