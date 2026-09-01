@@ -43,8 +43,10 @@
 │  dsh-env/     隔离 pnpm 环境（DSH 内核安装于此）          │
 │  dsh-home/    隔离 DSH_HOME（profile / 凭据 / 会话）     │
 │  pnpm-store/  内容寻址 store（更新秒级）                 │
-│  logs/        运行日志                                   │
 └──────────────────────┬─────────────────────────────────┘
+```
+
+> 运行日志不在应用数据目录内，由 `tauri-plugin-log` 写入**系统日志目录**（macOS `~/Library/Logs/com.dshcockpit.desktop/dsh-cockpit.log`、Windows `%LOCALAPPDATA%\com.dshcockpit.desktop\logs`），面板与菜单里的「日志目录」指向的就是该位置。
                        │ node dsh/bin.js web
                        ▼
           http://127.0.0.1:<port>  ← WebView 加载官方 Web UI

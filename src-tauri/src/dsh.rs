@@ -99,7 +99,11 @@ impl DshManager {
         let home_dir = data_dir.join("dsh-home");
         let cache_dir = data_dir.join("npm-cache");
         let store_dir = data_dir.join("pnpm-store");
-        let log_dir = data_dir.join("logs");
+        // 日志目录必须与 tauri-plugin-log 的 `TargetKind::LogDir` 写入位置一致：
+        // 该 target 固定写入 `app.path().app_log_dir()`（macOS ~/Library/Logs/{identifier}，
+        // Windows %LOCALAPPDATA%\{identifier}\logs）。此前用 data_dir/logs 导致
+        // "日志目录能创建但磁盘上看不到日志文件"（日志实际写到了 app_log_dir）。
+        let log_dir = app.path().app_log_dir()?;
         for d in [&env_dir, &home_dir, &cache_dir, &store_dir, &log_dir] {
             std::fs::create_dir_all(d)?;
         }

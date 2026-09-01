@@ -556,6 +556,7 @@ pub fn run() {
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
+                .max_file_size(5 * 1024 * 1024) // 5MB 轮转，防止日志无限增长
                 .targets([
                     Target::new(TargetKind::Stdout),
                     Target::new(TargetKind::LogDir {
