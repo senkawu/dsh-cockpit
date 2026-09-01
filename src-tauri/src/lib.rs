@@ -208,6 +208,37 @@ fn create_panel_window(app: &tauri::AppHandle) -> Result<WebviewWindow, Box<dyn 
     Ok(win)
 }
 
+/// 日志查看器窗口（隐藏创建，按需显示；关闭 → 隐藏，不退出）
+fn create_logs_window(app: &tauri::AppHandle) -> Result<WebviewWindow, Box<dyn std::error::Error>> {
+    let win = WebviewWindowBuilder::new(app, "logs", WebviewUrl::App("log-view.html".into()))
+        .title("DSH-Cockpit · 日志查看器")
+        .inner_size(760.0, 560.0)
+        .center()
+        .visible(false)
+        .devtools(false)
+        .on_navigation(|url| {
+            // 只允许自身页面
+            url.scheme() == "tauri"
+        })
+        .build()?;
+    let win2 = win.clone();
+    win.on_window_event(move |event| {
+        if let WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            let _ = win2.hide();
+        }
+    });
+    Ok(win)
+}
+
+/// 显示并聚焦日志查看器窗口
+pub fn show_logs_window(app: &tauri::AppHandle) {
+    if let Some(win) = app.get_webview_window("logs") {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+}
+
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -372,8 +403,8 @@ async fn bootstrap(app: tauri::AppHandle) {
     spawn_update_checker(&app, &manager);
 }
 
-/// 以带参数的形态重启自身（安全模式开关）
-fn relaunch_with_flag(app: &tauri::AppHandle, flag: &str) {
+/// 以带参数的形态重启自身（安全模式开关；崩溃弹窗「以安全模式重启」也走这里）
+pub(crate) fn relaunch_with_flag(app: &tauri::AppHandle, flag: &str) {
     let exe = std::env::current_exe().ok();
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     if !args.iter().any(|a| a == flag) {
@@ -395,6 +426,7 @@ fn build_app_menu(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Erro
     let restart = MenuItem::with_id(app, "restart-dsh", "重启 dsh 服务", true, None::<&str>)?;
     let safe = MenuItem::with_id(app, "safe-restart", "以安全模式重启", true, None::<&str>)?;
     let logs = MenuItem::with_id(app, "open-logs", "打开日志目录", true, None::<&str>)?;
+    let logs_viewer = MenuItem::with_id(app, "open-logs-viewer", "日志查看器", true, None::<&str>)?;
     let panel = MenuItem::with_id(app, "panel", "控制面板", true, None::<&str>)?;
     let quit = PredefinedMenuItem::quit(app, Some("退出"))?;
 
@@ -417,7 +449,7 @@ fn build_app_menu(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Erro
     )?;
 
     let app_menu = Submenu::with_items(app, "DSH-Cockpit", true, &[&about, &quit])?;
-    let dsh_menu = Submenu::with_items(app, "DSH", true, &[&check, &restart, &safe, &logs, &panel])?;
+    let dsh_menu = Submenu::with_items(app, "DSH", true, &[&check, &restart, &safe, &logs, &logs_viewer, &panel])?;
     let menu = Menu::with_items(app, &[&app_menu, &edit_menu, &dsh_menu])?;
     app.set_menu(menu)?;
 
@@ -429,7 +461,7 @@ fn build_app_menu(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Erro
                 "外壳版本：{}\nDSH 内核：{}\n端口：{}\n\n隔离环境：{}\nDSH_HOME：{}\n\n安全模式：{}",
                 app.package_info().version,
                 m.installed_version().unwrap_or_else(|| "未安装".into()),
-                m.port,
+                m.active_port.load(std::sync::atomic::Ordering::Relaxed).max(m.port),
                 m.env_dir.display(),
                 m.active_home().display(),
                 if m.safe_mode.load(Ordering::Relaxed) { "开" } else { "关" },
@@ -464,6 +496,7 @@ fn build_app_menu(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Erro
             let m = app.state::<DshManager>().inner();
             crate::tray::open_external(&m.log_dir.to_string_lossy());
         }
+        "open-logs-viewer" => show_logs_window(app),
         "panel" => tray::show_panel(app),
         _ => {}
     });
@@ -540,6 +573,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     handle.manage(Mutex::new(WindowRecovery::default()));
     create_main_window(&handle)?;
     create_panel_window(&handle)?;
+    create_logs_window(&handle)?;
 
     // 后台引导
     tauri::async_runtime::spawn(bootstrap(handle.clone()));
@@ -584,6 +618,11 @@ pub fn run() {
             commands::set_plugin_enabled,
             commands::set_skipped_version,
             commands::exit_safe_mode,
+            commands::get_logs,
+            commands::collect_diagnostics,
+            commands::open_log_viewer,
+            commands::open_log_dir,
+            commands::open_in_finder,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

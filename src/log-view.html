@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>DSH-Cockpit · 日志查看器</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="logview-body">
+  <main class="logview">
+    <div class="logview-toolbar">
+      <h1>日志查看器 <span id="log-path" class="ver"></span></h1>
+      <div class="logview-controls">
+        <input id="filter" type="text" placeholder="关键字过滤…" />
+        <select id="level">
+          <option value="">全部级别</option>
+          <option value="ERROR">ERROR</option>
+          <option value="WARN">WARN</option>
+          <option value="INFO">INFO</option>
+          <option value="DEBUG">DEBUG</option>
+        </select>
+        <label class="switch inline"><input type="checkbox" id="realtime" checked /> 实时</label>
+        <button id="btn-export">导出诊断包</button>
+        <button id="btn-open-dir">打开日志目录</button>
+        <button id="btn-clear">清屏</button>
+      </div>
+    </div>
+    <pre id="log" class="logview-panel"></pre>
+    <div id="hint" class="hint"></div>
+  </main>
+  <script src="log-view.js"></script>
+</body>
+</html>

@@ -139,3 +139,50 @@ footer { text-align: center; }
   max-height: 220px;
   overflow: auto;
 }
+
+/* ---- 日志查看器 ---- */
+.logview-body { background: var(--bg); height: 100vh; display: flex; }
+.logview {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 14px 16px;
+  gap: 10px;
+  min-width: 0;
+}
+.logview h1 { font-size: 15px; margin: 0; }
+.logview-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.logview-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.logview-controls input[type="text"] {
+  background: #10151c;
+  color: var(--fg);
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  width: 200px;
+}
+.logview-controls select {
+  background: #21262d;
+  color: var(--fg);
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+.logview-controls button { padding: 6px 12px; font-size: 12px; }
+.switch.inline { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--dim); }
+.logview-panel {
+  flex: 1;
+  margin: 0;
+  background: #10151c;
+  border: 1px solid #21262d;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font: 11px/1.5 ui-monospace, Menlo, monospace;
+  color: var(--dim);
+  white-space: pre-wrap;
+  word-break: break-all;
+  overflow: auto;
+  min-height: 0;
+}

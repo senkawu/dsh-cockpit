@@ -13,7 +13,7 @@
 //!   → 任一环节失败则自动回退 .bak，避免“变砖”。
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 
 use log::{error, info, warn};
@@ -61,7 +61,10 @@ pub struct DshManager {
     pub log_dir: PathBuf,       // 运行日志目录
     pub registry: String,       // npm registry（默认官方源；可配置 npmmirror 等）
     pub tag: String,            // dsh 版本 tag，默认 latest
-    pub port: u16,              // dsh web 端口，默认 3080
+    pub port: u16,              // 期望端口：0=系统动态分配（默认）；>0=固定端口（DSH_PORT/设置）
+    pub active_port: Arc<AtomicU16>,          // 实际运行端口（0=未设置；原子无锁，避免单线程运行时 Mutex 死锁）
+    pub crash_count: Arc<AtomicU32>,          // 连续快速崩溃计数（连续失败 → 建议安全模式）
+    pub last_start_at: Arc<AtomicU64>,         // 最近一次 start 时刻（epoch 毫秒，0=无）
     pub auto_check_update: Arc<AtomicBool>, // 启动时自动检查更新开关（控制面板可改）
     pub safe_mode: Arc<AtomicBool>,         // 安全模式：仅官方核心 bundle，跳过插件/更新
     pub skipped_version: Arc<Mutex<Option<String>>>, // 用户跳过的 dsh 版本（自动检查不再提示）
@@ -75,7 +78,8 @@ pub struct DshManager {
 pub struct StatusPayload {
     pub installed: Option<String>,
     pub running: bool,
-    pub port: u16,
+    pub port: u16,                       // 期望端口（0=动态分配）
+    pub active_port: Option<u16>,        // 实际运行端口（动态分配后回填）
     pub env_dir: String,
     pub home_dir: String,
     pub registry: String,
@@ -86,10 +90,15 @@ pub struct StatusPayload {
     pub app_version: String,
 }
 
+/// 固定端口冲突时的用户选择：附加到已有服务 / 改用空闲端口
+pub enum PortChoice {
+    Attach,
+    Use(u16),
+}
+
 impl DshManager {
     /// 由应用数据目录构造管理器（目录不存在则创建）
-    pub fn new(app: &AppHandle) -> Result<Self, Box<dyn std::error::Error>> {
-        let data_dir = app.path().app_data_dir()?;
+    pub fn new(app: &AppHandle) -> Result<Self, Box<dyn std::error::Error>> {        let data_dir = app.path().app_data_dir()?;
 
         // 迁移旧版（更名前 com.deepseek.dsh.desktop）数据：插件/会话/凭据/缓存一次性搬过来，
         // 否则改 identifier 后旧目录被"遗弃"，用户会发现插件不见了。
@@ -119,7 +128,7 @@ impl DshManager {
             .ok()
             .and_then(|p| p.parse().ok())
             .or(settings.port)
-            .unwrap_or(3080);
+            .unwrap_or(0); // 默认 0 = 系统动态分配端口（规避端口冲突）
         let tag = std::env::var("DSH_TAG").unwrap_or_else(|_| "latest".into());
 
         Ok(Self {
@@ -132,6 +141,9 @@ impl DshManager {
             registry,
             tag,
             port,
+            active_port: Arc::new(AtomicU16::new(0)),
+            crash_count: Arc::new(AtomicU32::new(0)),
+            last_start_at: Arc::new(AtomicU64::new(0)),
             auto_check_update: Arc::new(AtomicBool::new(settings.auto_check_update)),
             safe_mode: Arc::new(AtomicBool::new(false)),
             skipped_version: Arc::new(Mutex::new(settings.skipped_version)),
@@ -447,19 +459,98 @@ impl DshManager {
         self.emit_status(app, "error", "已回退到上一个可用版本", None);
     }
 
-    /// 启动 dsh web 服务（端口占用 → 附加到已有实例，不管理、不杀掉外部进程）
+    /// 启动 dsh web 服务。
+    ///
+    /// 端口策略（三级）：
+    ///   1. 默认 `--port 0`：由系统分配空闲端口，解析就绪行 URL 取实际端口（动态分配，规避冲突）；
+    ///   2. 固定端口（DSH_PORT / 面板设置）：先探测，占用则弹窗让用户选
+    ///      「换一个空闲端口 / 附加到已有服务」；
+    ///   3. 附加模式：附加到外部已运行的 dsh，不 spawn、不做进程管理、绝不误杀外部进程。
     pub async fn start(&self, app: &AppHandle) -> Result<(), String> {
-        // 端口已被占用：可能是用户外部手动启动的 dsh（或其它服务）。
-        // 按需求“不要杀掉用户外部手动启动的 dsh 进程”，这里只附加、不做进程管理。
-        if process_mgr::is_port_open(self.port).await {
-            warn!("端口 {} 已被占用，附加到已有服务（不做进程管理）", self.port);
-            self.emit_status(app, "ready", &format!("已连接到 127.0.0.1:{}", self.port), None);
-            self.navigate_main(app);
-            return Ok(());
-        }
+        self.last_start_at.store(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0),
+            Ordering::Relaxed,
+        );
 
+        let mut req_port = self.port;
+        // 固定端口且被占用 → 弹窗二选一
+        if req_port != 0 && process_mgr::is_port_open(req_port).await {
+            match self.prompt_port_conflict(app).await? {
+                PortChoice::Attach => return Ok(()), // 已附加并导航
+                PortChoice::Use(free) => req_port = free,
+            }
+        }
+        self.start_on_port(app, req_port).await
+    }
+
+    /// 固定端口被占用：弹窗「换一个空闲端口 / 附加到已有服务」
+    async fn prompt_port_conflict(&self, app: &AppHandle) -> Result<PortChoice, String> {
+        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogResult};
+        warn!("端口 {} 已被占用，等待用户选择…", self.port);
+        self.emit_status(
+            app,
+            "starting",
+            &format!("端口 {} 已被占用，等待用户选择…", self.port),
+            None,
+        );
+        let (tx, rx) = tokio::sync::oneshot::channel::<bool>();
+        let app2 = app.clone();
+        app.dialog()
+            .message(format!(
+                "端口 {} 已被占用（可能是外部已运行的 dsh 或其它服务）。\n\n\
+                 「换一个端口」将自动寻找空闲端口并启动新实例；\n\
+                 「附加」将直接连接已有服务（不做进程管理，不会关闭外部进程）。",
+                self.port
+            ))
+            .title("端口冲突")
+            .buttons(MessageDialogButtons::OkCancelCustom(
+                "换一个端口".into(),
+                "附加到已有服务".into(),
+            ))
+            .show_with_result(move |result| {
+                let attach = matches!(&result, MessageDialogResult::Custom(s) if s == "附加到已有服务");
+                let _ = tx.send(attach);
+                let _ = app2;
+            });
+        if rx.await.unwrap_or(false) {
+            // 附加模式：连接已有服务
+            self.emit_status(
+                app,
+                "ready",
+                &format!("已连接到 127.0.0.1:{}（附加模式，不做进程管理）", self.port),
+                None,
+            );
+            self.active_port.store(self.port, Ordering::Relaxed);
+            self.navigate_main(app);
+            return Ok(PortChoice::Attach);
+        }
+        // 换一个端口：3001-3999 内找第一个空闲
+        let free = process_mgr::find_free_port(3001, 3999)
+            .await
+            .ok_or("3001-3999 范围内没有空闲端口，请释放端口或改用系统分配")?;
+        warn!("端口 {} 被占用，改用空闲端口 {}", self.port, free);
+        Ok(PortChoice::Use(free))
+    }
+
+    /// 在指定端口上启动 dsh：spawn → 等待就绪（动态端口解析 URL）→ 日志流 + 崩溃监听
+    async fn start_on_port(&self, app: &AppHandle, req_port: u16) -> Result<(), String> {
         let bin = self.dsh_bin().ok_or("dsh 入口缺失，请先安装/更新 dsh")?;
-        self.emit_status(app, "starting", &format!("正在启动 dsh web (127.0.0.1:{})…", self.port), None);
+        self.emit_status(
+            app,
+            "starting",
+            &format!(
+                "正在启动 dsh web（端口：{}）…",
+                if req_port == 0 {
+                    "系统自动分配".to_string()
+                } else {
+                    req_port.to_string()
+                }
+            ),
+            None,
+        );
         let (mut rx, child) = process_mgr::spawn_node(
             app,
             &[
@@ -467,7 +558,7 @@ impl DshManager {
                 "web".into(),
                 "--no-open".into(),
                 "--port".into(),
-                self.port.to_string(),
+                req_port.to_string(),
             ],
             &self.dsh_envs(),
         )
@@ -477,42 +568,132 @@ impl DshManager {
             child,
             pid,
             managed: true,
-            port: self.port,
+            port: req_port,
         };
         *self.process.lock().unwrap() = Some(dsh_proc);
 
-        // 崩溃监听：轮询事件直到进程终止（前几个事件通常是 stdout 启动日志）
+        // 动态端口：等就绪行解析实际端口；固定端口：直接用 req_port
+        let ready_port = if req_port == 0 {
+            match process_mgr::wait_for_url(&mut rx, std::time::Duration::from_secs(60)).await {
+                Some(url) => process_mgr::port_from_url(&url)
+                    .ok_or_else(|| format!("无法解析 dsh 就绪 URL: {url}"))?,
+                None => {
+                    self.stop(app).await?;
+                    return Err("dsh 未在 60s 内输出就绪地址（可查看日志排查）".into());
+                }
+            }
+        } else {
+            req_port
+        };
+
+        // 崩溃监听 + 日志流：接管 rx（就绪行已消费），直到进程终止
         let app2 = app.clone();
         let manager2 = self.clone();
         tauri::async_runtime::spawn(async move {
             loop {
                 match rx.recv().await {
+                    Some(CommandEvent::Stdout(bytes)) | Some(CommandEvent::Stderr(bytes)) => {
+                        // 后端日志流 → GUI（dsh-log-line），前端实时展示
+                        let _ = app2.emit(
+                            "dsh-log-line",
+                            String::from_utf8_lossy(&bytes).into_owned(),
+                        );
+                    }
                     Some(CommandEvent::Terminated(payload)) => {
                         let code = payload.code.unwrap_or(-1);
                         error!("dsh 子进程退出 code={code}");
                         *manager2.process.lock().unwrap() = None;
                         if code != 0 {
-                            manager2.emit_status(&app2, "crashed", &format!("dsh 服务已停止（退出码 {code}）"), None);
+                            manager2.emit_status(
+                                &app2,
+                                "crashed",
+                                &format!("dsh 服务已停止（退出码 {code}）"),
+                                None,
+                            );
+                            manager2.handle_crash(&app2, code);
                         }
                         break;
                     }
-                    Some(_) => continue, // stdout/stderr 等，继续等待
+                    Some(CommandEvent::Error(e)) => warn!("dsh 子进程事件错误: {e}"),
+                    Some(_) => continue,
                     None => break,
                 }
             }
         });
 
         // 等待端口就绪（最多 90s）
-        if process_mgr::wait_port_ready(self.port, std::time::Duration::from_secs(90)).await {
-            info!("dsh web 就绪: http://127.0.0.1:{}", self.port);
-            self.emit_status(app, "ready", &format!("http://127.0.0.1:{}", self.port), None);
+        if process_mgr::wait_port_ready(ready_port, std::time::Duration::from_secs(90)).await {
+            self.active_port.store(ready_port, Ordering::Relaxed);
+            info!("dsh web 就绪: http://127.0.0.1:{}", ready_port);
+            self.emit_status(app, "ready", &format!("http://127.0.0.1:{}", ready_port), None);
             self.navigate_main(app);
             Ok(())
         } else {
             error!("dsh 启动超时，清理子进程");
             self.stop(app).await?;
-            Err(format!("dsh 服务启动超时（127.0.0.1:{}）", self.port))
+            Err(format!("dsh 服务启动超时（127.0.0.1:{ready_port}）"))
         }
+    }
+
+    /// 崩溃处理：连续快速崩溃计数；弹窗提供「立即重启 / 以安全模式重启 / 稍后处理」
+    pub fn handle_crash(&self, app: &AppHandle, code: i32) {
+        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogResult};
+        let started = self.last_start_at.load(Ordering::Relaxed);
+        let recent = started != 0
+            && std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0)
+                .saturating_sub(started)
+                < 5_000;
+        let count = if recent {
+            self.crash_count.fetch_add(1, Ordering::Relaxed) + 1
+        } else {
+            self.crash_count.store(1, Ordering::Relaxed);
+            1
+        };
+        let app2 = app.clone();
+        let manager2 = self.clone();
+        let (title, msg, buttons) = if count >= 2 {
+            (
+                "dsh 连续崩溃",
+                format!(
+                    "dsh 服务连续 {count} 次在启动后短时间内崩溃（退出码 {code}）。\n\
+                     可能是第三方插件导致——可尝试「以安全模式重启」排查（将停用全部第三方插件）。"
+                ),
+                MessageDialogButtons::YesNoCancelCustom(
+                    "立即重启".into(),
+                    "稍后处理".into(),
+                    "以安全模式重启".into(),
+                ),
+            )
+        } else {
+            (
+                "dsh 服务异常退出",
+                format!("dsh 服务异常退出（退出码 {code}）。\n可查看日志排查，或一键重启。"),
+                MessageDialogButtons::OkCancelCustom("立即重启".into(), "稍后处理".into()),
+            )
+        };
+        app.dialog()
+            .message(msg)
+            .title(title)
+            .buttons(buttons)
+            .show_with_result(move |result| {
+                let restart = matches!(&result, MessageDialogResult::Yes | MessageDialogResult::Ok)
+                    || matches!(&result, MessageDialogResult::Custom(s) if s == "立即重启");
+                if restart {
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = manager2.start(&app2).await {
+                            error!("崩溃后一键重启失败: {e}");
+                        }
+                    });
+                } else if matches!(&result, MessageDialogResult::Custom(s) if s == "以安全模式重启")
+                    || matches!(&result, MessageDialogResult::Cancel)
+                {
+                    crate::relaunch_with_flag(&app2, "--safe-mode");
+                }
+                // 稍后处理：保持外壳运行，用户可从托盘/面板随时重启
+            });
     }
 
     /// 停止我们自己管理的 dsh 子进程（先 SIGTERM 优雅退出，超时再强杀）
@@ -555,10 +736,11 @@ impl DshManager {
         env
     }
 
-    /// 主窗口导航到 dsh web UI
+    /// 主窗口导航到 dsh web UI（使用实际运行端口）
     pub fn navigate_main(&self, app: &AppHandle) {
         if let Some(win) = app.get_webview_window("main") {
-            let url = format!("http://127.0.0.1:{}", self.port);
+            let port = self.active_port.load(Ordering::Relaxed).max(self.port);
+            let url = format!("http://127.0.0.1:{}", port);
             if let Err(e) = win.navigate(url.parse().unwrap()) {
                 error!("导航失败: {e}");
             }
@@ -567,11 +749,12 @@ impl DshManager {
 
     /// 向前端广播 dsh 状态（并缓存最近一条，供页面加载后回放）
     pub fn emit_status(&self, app: &AppHandle, state: &str, message: &str, version: Option<&str>) {
+        let port = self.active_port.load(Ordering::Relaxed).max(self.port);
         let payload = serde_json::json!({
             "state": state,
             "message": message,
             "version": version,
-            "port": self.port,
+            "port": port,
         });
         *self.last_status.lock().unwrap() = Some(payload.clone());
         let _ = app.emit("dsh-status", payload);
@@ -587,7 +770,9 @@ impl DshManager {
         StatusPayload {
             installed: self.installed_version(),
             running: self.process.lock().unwrap().is_some(),
-            port: self.port,
+            port: self.active_port.load(Ordering::Relaxed).max(self.port),
+            active_port: (self.active_port.load(Ordering::Relaxed) != 0)
+                .then(|| self.active_port.load(Ordering::Relaxed)),
             env_dir: self.env_dir.to_string_lossy().into_owned(),
             home_dir: self.active_home().to_string_lossy().into_owned(),
             registry: self.registry.clone(),

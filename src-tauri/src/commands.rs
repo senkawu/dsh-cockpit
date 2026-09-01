@@ -178,3 +178,87 @@ pub async fn check_shell_update(app: AppHandle) -> Result<String, String> {
         None => Ok("外壳已是最新版本".into()),
     }
 }
+
+/// 读取外壳日志文件尾部（日志查看器历史；dsh 子进程实时日志走 dsh-log-line 事件）
+#[tauri::command]
+pub fn get_logs(manager: State<'_, DshManager>, limit: Option<usize>) -> Vec<String> {
+    let path = manager.inner().log_dir.join("dsh-cockpit.log");
+    let limit = limit.unwrap_or(800).min(5000);
+    match std::fs::read_to_string(&path) {
+        Ok(raw) => {
+            let lines: Vec<String> = raw.lines().map(|s| s.to_string()).collect();
+            let start = lines.len().saturating_sub(limit);
+            lines[start..].to_vec()
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+/// 导出诊断包：日志 + 版本/平台信息 → zip，返回压缩包路径（供前端展示/打开）
+#[tauri::command]
+pub fn collect_diagnostics(manager: State<'_, DshManager>, app: AppHandle) -> Result<String, String> {
+    use std::io::Write;
+    let m = manager.inner();
+    let out_dir = m.data_dir.join("diagnostics");
+    std::fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let zip_path = out_dir.join(format!("dsh-cockpit-diagnostics-{secs}.zip"));
+
+    let file = std::fs::File::create(&zip_path).map_err(|e| e.to_string())?;
+    let mut zw = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    let mut info = String::new();
+    info.push_str(&format!("app_version: {}\n", app.package_info().version));
+    info.push_str(&format!(
+        "platform: {}-{}\n",
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    ));
+    info.push_str(&format!(
+        "dsh_version: {}\n",
+        m.installed_version().unwrap_or_else(|| "未安装".into())
+    ));
+    info.push_str(&format!(
+        "port: {}\n",
+        m.active_port.load(std::sync::atomic::Ordering::Relaxed).max(m.port)
+    ));
+    info.push_str(&format!("registry: {}\n", m.registry));
+    info.push_str(&format!("env_dir: {}\n", m.env_dir.display()));
+    info.push_str(&format!("home_dir: {}\n", m.active_home().display()));
+    info.push_str(&format!("log_dir: {}\n", m.log_dir.display()));
+    zw.start_file("info.txt", options).map_err(|e| e.to_string())?;
+    zw.write_all(info.as_bytes()).map_err(|e| e.to_string())?;
+
+    if let Ok(raw) = std::fs::read_to_string(m.log_dir.join("dsh-cockpit.log")) {
+        zw.start_file("dsh-cockpit.log", options).map_err(|e| e.to_string())?;
+        zw.write_all(raw.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    zw.finish().map_err(|e| e.to_string())?;
+    Ok(zip_path.to_string_lossy().into_owned())
+}
+
+/// 打开日志查看器窗口
+#[tauri::command]
+pub fn open_log_viewer(app: AppHandle) -> Result<(), String> {
+    crate::show_logs_window(&app);
+    Ok(())
+}
+
+/// 打开日志目录（系统文件管理器）
+#[tauri::command]
+pub fn open_log_dir(manager: State<'_, DshManager>) -> Result<(), String> {
+    crate::tray::open_external(&manager.inner().log_dir.to_string_lossy());
+    Ok(())
+}
+
+/// 在系统文件管理器中显示指定路径（诊断包等）
+#[tauri::command]
+pub fn open_in_finder(path: String) -> Result<(), String> {
+    crate::tray::open_external(&path);
+    Ok(())
+}

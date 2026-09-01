@@ -128,6 +128,10 @@ jobs:
   release:
     name: 📦 发布 GitHub Release
     runs-on: ubuntu-latest
+    # 显式声明写权限：push tag 与创建 Release 需要 contents:write
+    # （仓库设置里的 Actions 工作流权限也需为 read/write，两者缺一不可）
+    permissions:
+      contents: write
     # 只依赖非 mac 核心任务（mac 排队/失败不阻塞发布）；产物按实际存在收集
     needs: [win-x64, win-arm64, linux-deb, linux-rpm]
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'

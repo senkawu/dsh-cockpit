@@ -9,7 +9,7 @@ async function refresh() {
     const s = await invoke('get_status');
     $('installed').textContent = s.installed || '未安装';
     $('running').textContent = s.running ? '运行中' : '已停止';
-    $('port').textContent = s.port;
+    $('port').textContent = s.port || '—'; // 动态端口未启动时显示 —
     $('registry').textContent = s.registry;
     $('envDir').textContent = s.envDir;
     $('homeDir').textContent = s.homeDir;
@@ -77,6 +77,18 @@ async function shellUpdate() {
   }
 }
 
+async function exportDiagnostics() {
+  const out = $('diag-result');
+  out.textContent = '正在打包诊断包…';
+  try {
+    const p = await invoke('collect_diagnostics');
+    out.textContent = '已生成: ' + p;
+    await invoke('open_in_finder', { path: p });
+  } catch (e) {
+    out.textContent = '导出失败: ' + e;
+  }
+}
+
 async function refreshPlugins() {
   const list = document.getElementById('plugin-list');
   const hint = document.getElementById('plugin-hint');
@@ -114,6 +126,8 @@ $('btn-check').addEventListener('click', checkUpdate);
 $('btn-update').addEventListener('click', applyUpdate);
 $('btn-restart').addEventListener('click', restart);
 $('btn-shell-update').addEventListener('click', shellUpdate);
+$('btn-logs').addEventListener('click', () => invoke('open_log_viewer'));
+$('btn-export-diag').addEventListener('click', exportDiagnostics);
 $('btn-quit').addEventListener('click', () => invoke('quit_app'));
 $('btn-exit-safe').addEventListener('click', () => invoke('exit_safe_mode'));
 $('auto-check').addEventListener('change', (e) => {

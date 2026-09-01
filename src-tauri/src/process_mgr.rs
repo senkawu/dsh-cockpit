@@ -176,11 +176,30 @@ fn url_regex() -> regex::Regex {
     regex::Regex::new(r"dsh web:\s+(https?://\S+)").unwrap()
 }
 
-/// 端口是否已被占用（只测 TCP 连通，不做 HTTP 校验）
+/// 端口是否已被占用（只测 TCP 连通，不做 HTTP 校验；800ms 超时防挂起）
 pub async fn is_port_open(port: u16) -> bool {
-    tokio::net::TcpStream::connect(("127.0.0.1", port))
-        .await
-        .is_ok()
+    tokio::time::timeout(
+        Duration::from_millis(800),
+        tokio::net::TcpStream::connect(("127.0.0.1", port)),
+    )
+    .await
+    .map(|r| r.is_ok())
+    .unwrap_or(false)
+}
+
+/// 从 dsh 就绪行 URL（`dsh web: http://127.0.0.1:<port>`）解析端口
+pub fn port_from_url(url: &str) -> Option<u16> {
+    url.split(':').last().and_then(|s| s.parse().ok())
+}
+
+/// 在 [start, end] 范围内找第一个空闲端口（动态端口分配用）
+pub async fn find_free_port(start: u16, end: u16) -> Option<u16> {
+    for port in start..=end {
+        if !is_port_open(port).await {
+            return Some(port);
+        }
+    }
+    None
 }
 
 /// 等待端口可访问（HTTP GET / 返回 200 即视为就绪）
