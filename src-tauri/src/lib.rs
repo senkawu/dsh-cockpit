@@ -72,6 +72,17 @@ fn navigation_allowed(app: &tauri::AppHandle, url: &tauri::Url) -> bool {
     false
 }
 
+/// 强制 dsh Web UI 使用中文：dsh 按 `navigator.language` 决定界面语言（无则回退英文）。
+/// 必须在页面脚本执行前（PageLoadEvent::Started）注入，否则 dsh 客户端已按英文初始化。
+const FORCE_ZH_LOCALE_JS: &str = r#"
+  (function(){
+    try {
+      Object.defineProperty(navigator, 'language', { get: () => 'zh-CN' });
+      Object.defineProperty(navigator, 'languages', { get: () => ['zh-CN', 'zh', 'en'] });
+    } catch (e) {}
+  })();
+"#;
+
 /// 屏蔽 DevTools 快捷键（**不**拦截右键菜单——Inspect 由 devtools(false) 原生屏蔽，
 /// WebView2 右键菜单里的 Inspect 项随之消失；拦截 contextmenu 会把复制/粘贴等右键功能一起干掉）。
 const BLOCK_DEVTOOLS_KEYS_JS: &str = r#"
@@ -101,8 +112,14 @@ fn create_main_window(app: &tauri::AppHandle) -> Result<WebviewWindow, Box<dyn s
         })
         .on_page_load(|win, payload| {
             use tauri::webview::PageLoadEvent;
-            if matches!(payload.event(), PageLoadEvent::Finished) {
-                let _ = win.eval(BLOCK_DEVTOOLS_KEYS_JS);
+            match payload.event() {
+                // 页面脚本执行前注入语言，让 dsh UI 使用中文
+                PageLoadEvent::Started => {
+                    let _ = win.eval(FORCE_ZH_LOCALE_JS);
+                }
+                PageLoadEvent::Finished => {
+                    let _ = win.eval(BLOCK_DEVTOOLS_KEYS_JS);
+                }
             }
         })
         .build()?;

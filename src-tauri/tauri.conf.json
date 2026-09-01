@@ -32,6 +32,14 @@
     "category": "DeveloperTool",
     "shortDescription": "DSH-Cockpit 桌面客户端",
     "longDescription": "Tauri 2 外壳：隔离 pnpm 环境安装/更新 dsh 内核，加载本地 dsh web UI",
+    "windows": {
+      "nsis": {
+        "languages": [
+          "SimpChinese",
+          "English"
+        ]
+      }
+    },
     "linux": {
       "deb": {
         "depends": [
