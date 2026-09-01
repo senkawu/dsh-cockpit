@@ -95,6 +95,82 @@ mod tests {
         assert_eq!(incompatible_reason("0.3.0"), None);
         assert_eq!(incompatible_reason("99.0.0"), None);
     }
+
+    // ---------- 凭据同步（P2b bug 修复回归） ----------
+
+    fn yaml(s: &str) -> serde_yaml::Mapping {
+        serde_yaml::from_str(s).unwrap()
+    }
+
+    /// 断言规范化后：顶层只有 refs/version，字符串键都在 refs 下，且 version=1
+    fn assert_valid_shape(m: &serde_yaml::Mapping) {
+        for (k, v) in m.iter() {
+            let key = k.as_str().unwrap();
+            assert!(key == "refs" || key == "version", "顶层不应有 {key}");
+            if key == "version" {
+                assert_eq!(v.as_u64(), Some(1));
+            }
+        }
+        assert!(m.contains_key(&serde_yaml::Value::String("refs".into())));
+    }
+
+    #[test]
+    fn sync_moves_flat_source_keys_into_refs() {
+        // 源：扁平结构（无 refs/version）
+        let src = yaml("DEEPSEEK_API_KEY: sk-flat-1\n");
+        let mut target = serde_yaml::Mapping::new();
+        let (copied, conflicted, changed) = normalize_credentials(&mut target, &src);
+        assert_eq!(copied, vec!["DEEPSEEK_API_KEY"]);
+        assert!(conflicted.is_empty());
+        assert!(changed);
+        assert_valid_shape(&target);
+        let refs = target
+            .get(&serde_yaml::Value::String("refs".into()))
+            .unwrap()
+            .as_mapping()
+            .unwrap();
+        assert!(refs.contains_key(&serde_yaml::Value::String("DEEPSEEK_API_KEY".into())));
+    }
+
+    #[test]
+    fn sync_heals_legacy_mixed_target() {
+        // 目标：历史版本误写的混合结构（version+refs+顶层扁平键）
+        let src = yaml("refs:\n  OTHER: sk-other-1\n");
+        let mut target = yaml("version: 1\nrefs: {}\nDEEPSEEK_API_KEY: sk-mixed-1\n");
+        let (copied, conflicted, changed) = normalize_credentials(&mut target, &src);
+        assert_eq!(copied, vec!["OTHER"]);
+        assert!(conflicted.is_empty());
+        assert!(changed);
+        assert_valid_shape(&target); // 顶层扁平键已被挪走
+        let refs = target
+            .get(&serde_yaml::Value::String("refs".into()))
+            .unwrap()
+            .as_mapping()
+            .unwrap();
+        assert!(refs.contains_key(&serde_yaml::Value::String("DEEPSEEK_API_KEY".into())));
+        assert!(refs.contains_key(&serde_yaml::Value::String("OTHER".into())));
+    }
+
+    #[test]
+    fn sync_never_overwrites_existing() {
+        let src = yaml("refs:\n  KEY: sk-new-1\n");
+        let mut target = yaml("version: 1\nrefs:\n  KEY: sk-old-1\n");
+        let (copied, conflicted, changed) = normalize_credentials(&mut target, &src);
+        assert!(copied.is_empty());
+        assert_eq!(conflicted, vec!["KEY"]);
+        assert!(!changed); // 值未变，不写盘
+        let refs = target
+            .get(&serde_yaml::Value::String("refs".into()))
+            .unwrap()
+            .as_mapping()
+            .unwrap();
+        assert_eq!(
+            refs.get(&serde_yaml::Value::String("KEY".into()))
+                .unwrap()
+                .as_str(),
+            Some("sk-old-1")
+        );
+    }
 }
 
 /// 内置插件：插件市场 / 小鲸鱼余额挂件 / 用量统计面板。
@@ -1359,6 +1435,112 @@ pub struct CredentialSyncReport {
     pub target: String,
 }
 
+/// 规范化凭据映射（纯函数，可单测）：
+/// - 保证顶层有 `refs: {}` 与 `version: 1`（dsh 凭据契约）；
+/// - 源/目标里**顶层字符串键一律并入 refs**（旧版扁平结构 / 历史误写自愈），
+///   否则 dsh 报 "unknown top-level key" 拒绝启动；
+/// - 只补缺失键，绝不覆盖已有值。
+/// 返回 (新增键, 冲突键, 是否有变更)。
+fn normalize_credentials(
+    target_map: &mut serde_yaml::Mapping,
+    source_map: &serde_yaml::Mapping,
+) -> (Vec<String>, Vec<String>, bool) {
+    let mut copied: Vec<String> = Vec::new();
+    let mut conflicted: Vec<String> = Vec::new();
+    let mut changed = false;
+    let refs_key = serde_yaml::Value::String("refs".into());
+    if !target_map.contains_key(&refs_key) {
+        target_map.insert(refs_key.clone(), serde_yaml::Value::Mapping(Default::default()));
+        changed = true;
+    }
+    let version_key = serde_yaml::Value::String("version".into());
+    if !target_map.contains_key(&version_key) {
+        target_map.insert(
+            version_key,
+            serde_yaml::Value::Number(serde_yaml::Number::from(1)),
+        );
+        changed = true;
+    }
+    // 自愈：目标里已存在的顶层字符串键（历史误写）挪进 refs
+    {
+        let flat_keys: Vec<(serde_yaml::Value, serde_yaml::Value)> = target_map
+            .iter()
+            .filter(|(k, v)| {
+                k.as_str().map(|s| s != "refs" && s != "version").unwrap_or(false)
+                    && v.is_string()
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if !flat_keys.is_empty() {
+            let trk = refs_key.clone();
+            let mut moved_keys: Vec<serde_yaml::Value> = Vec::new();
+            {
+                let tr = target_map.get_mut(&trk).and_then(|v| v.as_mapping_mut());
+                if let Some(tr) = tr {
+                    for (k, v) in flat_keys {
+                        if !tr.contains_key(&k) {
+                            tr.insert(k.clone(), v.clone());
+                        }
+                        moved_keys.push(k.clone());
+                    }
+                }
+            }
+            for k in moved_keys {
+                target_map.remove(&k);
+            }
+            changed = true;
+        }
+    }
+    // 源：顶层字符串键并入 refs（宽松兼容扁平结构）
+    for (k, v) in source_map.iter() {
+        let Some(key) = k.as_str() else { continue };
+        if key == "refs" || key == "version" {
+            continue;
+        }
+        if !v.is_string() {
+            continue;
+        }
+        let trk = refs_key.clone();
+        if let Some(tr) = target_map.get_mut(&trk).and_then(|v| v.as_mapping_mut()) {
+            match tr.get(k) {
+                None => {
+                    tr.insert(k.clone(), v.clone());
+                    copied.push(key.to_string());
+                    changed = true;
+                }
+                Some(existing) if existing != v => {
+                    conflicted.push(key.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+    // 源：refs 命名空间下的字符串凭据
+    if let Some(serde_yaml::Value::Mapping(src_refs)) = source_map.get(&refs_key) {
+        let trk = refs_key.clone();
+        if let Some(tr) = target_map.get_mut(&trk).and_then(|v| v.as_mapping_mut()) {
+            for (k, v) in src_refs.iter() {
+                let Some(key) = k.as_str() else { continue };
+                if !v.is_string() {
+                    continue;
+                }
+                match tr.get(k) {
+                    None => {
+                        tr.insert(k.clone(), v.clone());
+                        copied.push(key.to_string());
+                        changed = true;
+                    }
+                    Some(existing) if existing != v => {
+                        conflicted.push(key.to_string());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    (copied, conflicted, changed)
+}
+
 impl DshManager {
     /// 把系统 ~/.dsh/.credentials.yaml 的顶层字符串键**单向**复制进当前 home 的凭据：
     ///   - 只补缺失键，绝不覆盖已有值（冲突列入 conflicted，绝不静默覆盖）；
@@ -1389,66 +1571,10 @@ impl DshManager {
             Ok(t) => serde_yaml::from_str::<serde_yaml::Mapping>(&t).unwrap_or_default(),
             Err(_) => serde_yaml::Mapping::new(),
         };
-        // 目标 refs（不存在则创建）；dsh 要求顶层 version: 1
-        let refs_key = serde_yaml::Value::String("refs".into());
-        if !target_map.contains_key(&refs_key) {
-            target_map.insert(refs_key.clone(), serde_yaml::Value::Mapping(Default::default()));
-        }
-        let version_key = serde_yaml::Value::String("version".into());
-        if !target_map.contains_key(&version_key) {
-            target_map.insert(
-                version_key,
-                serde_yaml::Value::Number(serde_yaml::Number::from(1)),
-            );
-        }
-        let mut changed = false;
-        // 1) 顶层字符串键（宽松兼容）
-        for (k, v) in mapping.iter() {
-            let Some(key) = k.as_str() else { continue };
-            if key == "refs" || key == "version" {
-                continue;
-            }
-            if !v.is_string() {
-                continue;
-            }
-            match target_map.get(k) {
-                None => {
-                    target_map.insert(k.clone(), v.clone());
-                    report.copied.push(key.to_string());
-                    changed = true;
-                }
-                Some(existing) if existing != v => {
-                    report.conflicted.push(key.to_string());
-                }
-                _ => {}
-            }
-        }
-        // 2) refs 命名空间下的字符串凭据（主要来源：DEEPSEEK_API_KEY 等）
-        if let Some(serde_yaml::Value::Mapping(src_refs)) = mapping.get(&refs_key) {
-            let target_refs_key = refs_key.clone();
-            let target_refs = target_map
-                .get_mut(&target_refs_key)
-                .and_then(|v| v.as_mapping_mut());
-            if let Some(target_refs) = target_refs {
-                for (k, v) in src_refs.iter() {
-                    let Some(key) = k.as_str() else { continue };
-                    if !v.is_string() {
-                        continue;
-                    }
-                    match target_refs.get(k) {
-                        None => {
-                            target_refs.insert(k.clone(), v.clone());
-                            report.copied.push(key.to_string());
-                            changed = true;
-                        }
-                        Some(existing) if existing != v => {
-                            report.conflicted.push(key.to_string());
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
+        // 规范化：refs/version 兜底 + 顶层扁平键并入 refs（含历史误写自愈）
+        let (copied, conflicted, changed) = normalize_credentials(&mut target_map, &mapping);
+        report.copied = copied;
+        report.conflicted = conflicted;
         if changed {
             // 写入前备份旧凭据
             if target.exists() {

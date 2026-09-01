@@ -442,6 +442,8 @@ pub async fn wait_for_url(rx: &mut Receiver<CommandEvent>, timeout: Duration) ->
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
+            // 超时：把已收集的输出打进日志，便于诊断（此前直接丢弃导致查不到原因）
+            log::error!("dsh 等待就绪超时，已收集输出：\n{}", buf.trim());
             return None;
         }
         match tokio::time::timeout(remaining, rx.recv()).await {
@@ -452,7 +454,16 @@ pub async fn wait_for_url(rx: &mut Receiver<CommandEvent>, timeout: Duration) ->
                 }
             }
             Ok(Some(CommandEvent::Terminated(p))) => {
-                warn!("dsh 在输出就绪行前退出 code={:?}", p.code);
+                // 退出前把已收集输出打出来（此前丢弃，诊断包看不到 dsh 报错）
+                if !buf.trim().is_empty() {
+                    log::error!(
+                        "dsh 在输出就绪行前退出 code={:?}，已收集输出：\n{}",
+                        p.code,
+                        buf.trim()
+                    );
+                } else {
+                    warn!("dsh 在输出就绪行前退出 code={:?}（无任何输出）", p.code);
+                }
                 return None;
             }
             Ok(Some(CommandEvent::Error(e))) => {
