@@ -136,9 +136,12 @@ fn create_main_window(app: &tauri::AppHandle) -> Result<WebviewWindow, Box<dyn s
         })
         .build()?;
 
-    // P4 2.10：窗口大小/位置记忆（保存由插件自动完成，这里恢复主窗口状态）
+    // P4 2.10：窗口大小/位置记忆（保存由插件自动完成，这里恢复主窗口状态；
+    // 排除 VISIBLE——可见性由代码控制，避免恢复成隐藏或把面板/日志窗口带出来）
     use tauri_plugin_window_state::{StateFlags, WindowExt};
-    let _ = win.restore_state(StateFlags::all());
+    let _ = win.restore_state(
+        StateFlags::all() - StateFlags::VISIBLE,
+    );
 
     // 关闭 → 隐藏到托盘（不退出）
     {
@@ -790,8 +793,16 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
-        .plugin(tauri_plugin_window_state::Builder::default().build())
-        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(
+            // P4 2.10 窗口状态记忆：只记忆大小/位置/最大化，**不恢复可见性**——
+            // 否则面板/日志窗口上次被打开过，下次启动会自动弹出（bug）。
+            tauri_plugin_window_state::Builder::default()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::all()
+                        - tauri_plugin_window_state::StateFlags::VISIBLE,
+                )
+                .build(),
+        )        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(log::LevelFilter::Info)
