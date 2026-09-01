@@ -11,10 +11,16 @@ pub struct Settings {
     pub auto_check_update: bool,
     /// npm registry 覆盖（默认官方源；国内可设 https://registry.npmmirror.com）
     pub registry: Option<String>,
-    /// dsh web 端口覆盖（默认 3080）
+    /// dsh web 端口覆盖（默认 0 = 系统动态分配）
     pub port: Option<u16>,
     /// 用户选择“跳过此版本”的 dsh 版本（自动检查时不再提示；手动检查忽略）
     pub skipped_version: Option<String>,
+    /// home 模式："isolated"（默认，隔离 dsh-home）/ "system"（直接用 ~/.dsh）
+    pub home_mode: Option<String>,
+    /// 首启向导是否已完成（导入配置 / 保持隔离 / 使用系统目录）
+    pub setup_done: bool,
+    /// 启动时把系统 ~/.dsh 凭据单向复制进隔离凭据（默认开；safe-mode 停用）
+    pub sync_credentials: bool,
 }
 
 impl Default for Settings {
@@ -24,6 +30,9 @@ impl Default for Settings {
             registry: None,
             port: None,
             skipped_version: None,
+            home_mode: None,
+            setup_done: false,
+            sync_credentials: true,
         }
     }
 }

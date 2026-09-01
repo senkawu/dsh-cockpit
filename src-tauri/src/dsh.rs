@@ -67,6 +67,9 @@ pub struct DshManager {
     pub last_start_at: Arc<AtomicU64>,         // 最近一次 start 时刻（epoch 毫秒，0=无）
     pub auto_check_update: Arc<AtomicBool>, // 启动时自动检查更新开关（控制面板可改）
     pub safe_mode: Arc<AtomicBool>,         // 安全模式：仅官方核心 bundle，跳过插件/更新
+    pub use_system_home: Arc<AtomicBool>,   // home 模式：true=直接用 ~/.dsh（系统模式）；false=隔离 dsh-home
+    pub sync_credentials: Arc<AtomicBool>,  // 启动时单向同步系统凭据（safe-mode 停用）
+    pub setup_done: Arc<AtomicBool>,        // 首启向导完成标记
     pub skipped_version: Arc<Mutex<Option<String>>>, // 用户跳过的 dsh 版本（自动检查不再提示）
     pub last_status: Arc<Mutex<Option<serde_json::Value>>>, // 最近一次状态（页面加载后可回放，防事件早于监听丢失）
     pub process: Arc<Mutex<Option<DshProcess>>>, // 我们管理的 dsh 子进程
@@ -88,6 +91,10 @@ pub struct StatusPayload {
     pub skipped_version: Option<String>,
     pub log_dir: String,
     pub app_version: String,
+    pub home_mode: String,          // "isolated" | "system"
+    pub system_home: String,        // 系统 ~/.dsh 路径
+    pub sync_credentials: bool,
+    pub setup_done: bool,
 }
 
 /// 固定端口冲突时的用户选择：附加到已有服务 / 改用空闲端口
@@ -146,6 +153,12 @@ impl DshManager {
             last_start_at: Arc::new(AtomicU64::new(0)),
             auto_check_update: Arc::new(AtomicBool::new(settings.auto_check_update)),
             safe_mode: Arc::new(AtomicBool::new(false)),
+            use_system_home: Arc::new(AtomicBool::new(
+                std::env::var("DSH_HOME_MODE").as_deref() == Ok("system")
+                    || settings.home_mode.as_deref() == Some("system"),
+            )),
+            sync_credentials: Arc::new(AtomicBool::new(settings.sync_credentials)),
+            setup_done: Arc::new(AtomicBool::new(settings.setup_done)),
             skipped_version: Arc::new(Mutex::new(settings.skipped_version)),
             last_status: Arc::new(Mutex::new(None)),
             process: Arc::new(Mutex::new(None)),
@@ -350,10 +363,15 @@ impl DshManager {
         // 1) 优雅停止正在运行的 dsh 子进程（只动我们自己管理的）
         self.stop(app).await?;
 
-        // 2) 更新前备份：隔离 npm 环境 + DSH_HOME（profile）
+        // 2) 更新前备份：隔离 npm 环境 + DSH_HOME（profile）。
+        //    系统模式下 DSH_HOME 指向 ~/.dsh（用户自有数据），绝不整目录备份/回退，只备份隔离环境。
         self.emit_status(app, "updating", "更新前备份当前环境与配置…", None);
         backup_dir(&self.env_dir);
-        backup_dir(&self.home_dir);
+        if !self.use_system_home.load(Ordering::Relaxed) {
+            backup_dir(&self.home_dir);
+        } else {
+            warn!("系统模式：跳过 ~/.dsh 备份（用户自有数据，更新不回退 profile）");
+        }
 
         // 3) 安装 latest
         self.write_manifest();
@@ -715,12 +733,45 @@ impl DshManager {
     }
 
     /// 实际使用的 DSH_HOME：安全模式下切到全新隔离目录（仅官方核心 bundle，恢复用）
+    /// 实际使用的 DSH_HOME：
+    ///   - 安全模式 → dsh-home-safe（仅官方核心 bundle，恢复用）
+    ///   - 系统模式 → $DSH_HOME 或 ~/.dsh（命令行老用户直接复用，客户端不回写系统文件）
+    ///   - 默认     → 隔离的 dsh-home
     pub fn active_home(&self) -> PathBuf {
         if self.safe_mode.load(Ordering::Relaxed) {
-            self.data_dir.join("dsh-home-safe")
-        } else {
-            self.home_dir.clone()
+            return self.data_dir.join("dsh-home-safe");
         }
+        if self.use_system_home.load(Ordering::Relaxed) {
+            return std::env::var("DSH_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| {
+                    std::env::var("HOME")
+                        .map(|h| PathBuf::from(h).join(".dsh"))
+                        .unwrap_or_else(|_| self.home_dir.clone())
+                });
+        }
+        self.home_dir.clone()
+    }
+
+    /// 系统 ~/.dsh 是否存在（首启向导 / 凭据同步的前提）
+    pub fn system_home_exists(&self) -> bool {
+        let home = std::env::var("DSH_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::env::var("HOME")
+                    .map(|h| PathBuf::from(h).join(".dsh"))
+                    .unwrap_or_default()
+            });
+        home.is_dir()
+    }
+
+    /// 隔离 home 是否为空（尚无 profiles → 视为未初始化，可触发首启向导）
+    pub fn isolated_home_empty(&self) -> bool {
+        let profiles = self.home_dir.join("profiles");
+        !profiles.exists()
+            || std::fs::read_dir(&profiles)
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(true)
     }
 
     /// dsh 子进程环境变量（DSH_HOME 隔离到应用数据目录；
@@ -781,6 +832,14 @@ impl DshManager {
             skipped_version: self.skipped_version.lock().unwrap().clone(),
             log_dir: self.log_dir.to_string_lossy().into_owned(),
             app_version: String::new(), // 由 commands::get_status 用 package_info 填充
+            home_mode: if self.use_system_home.load(Ordering::Relaxed) { "system".into() } else { "isolated".into() },
+            system_home: self.system_home_exists().then(|| {
+                std::env::var("DSH_HOME").unwrap_or_else(|_| {
+                    std::env::var("HOME").map(|h| format!("{h}/.dsh")).unwrap_or_default()
+                })
+            }).unwrap_or_default(),
+            sync_credentials: self.sync_credentials.load(Ordering::Relaxed),
+            setup_done: self.setup_done.load(Ordering::Relaxed),
         }
     }
 }
@@ -1180,6 +1239,221 @@ fn migrate_legacy_data(new_dir: &Path) {
         }
     }
     log::info!("旧版数据迁移完成（插件/会话/凭据已保留）");
+}
+
+/// 凭据单向同步结果（面板展示 / 日志）
+#[derive(Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CredentialSyncReport {
+    pub copied: Vec<String>,
+    pub conflicted: Vec<String>,
+    pub source: String,
+    pub target: String,
+}
+
+impl DshManager {
+    /// 把系统 ~/.dsh/.credentials.yaml 的顶层字符串键**单向**复制进当前 home 的凭据：
+    ///   - 只补缺失键，绝不覆盖已有值（冲突列入 conflicted，绝不静默覆盖）；
+    ///   - 写入前备份旧凭据，原子替换；safe-mode 停用。
+    pub fn sync_credentials_from_system(&self) -> CredentialSyncReport {
+        let sys_home = std::env::var("DSH_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                std::env::var("HOME")
+                    .map(|h| PathBuf::from(h).join(".dsh"))
+                    .unwrap_or_default()
+            });
+        let source = sys_home.join(".credentials.yaml");
+        let target = self.active_home().join(".credentials.yaml");
+        let mut report = CredentialSyncReport {
+            copied: Vec::new(),
+            conflicted: Vec::new(),
+            source: source.to_string_lossy().into_owned(),
+            target: target.to_string_lossy().into_owned(),
+        };
+        if !source.is_file() {
+            return report;
+        }
+        // 读取源。dsh 凭据文件结构：{ version, refs: { KEY: value } }（refs 是真实凭据命名空间）
+        let Ok(raw) = std::fs::read_to_string(&source) else { return report };
+        let Ok(mapping) = serde_yaml::from_str::<serde_yaml::Mapping>(&raw) else { return report };
+        let mut target_map: serde_yaml::Mapping = match std::fs::read_to_string(&target) {
+            Ok(t) => serde_yaml::from_str::<serde_yaml::Mapping>(&t).unwrap_or_default(),
+            Err(_) => serde_yaml::Mapping::new(),
+        };
+        // 目标 refs（不存在则创建）；dsh 要求顶层 version: 1
+        let refs_key = serde_yaml::Value::String("refs".into());
+        if !target_map.contains_key(&refs_key) {
+            target_map.insert(refs_key.clone(), serde_yaml::Value::Mapping(Default::default()));
+        }
+        let version_key = serde_yaml::Value::String("version".into());
+        if !target_map.contains_key(&version_key) {
+            target_map.insert(
+                version_key,
+                serde_yaml::Value::Number(serde_yaml::Number::from(1)),
+            );
+        }
+        let mut changed = false;
+        // 1) 顶层字符串键（宽松兼容）
+        for (k, v) in mapping.iter() {
+            let Some(key) = k.as_str() else { continue };
+            if key == "refs" || key == "version" {
+                continue;
+            }
+            if !v.is_string() {
+                continue;
+            }
+            match target_map.get(k) {
+                None => {
+                    target_map.insert(k.clone(), v.clone());
+                    report.copied.push(key.to_string());
+                    changed = true;
+                }
+                Some(existing) if existing != v => {
+                    report.conflicted.push(key.to_string());
+                }
+                _ => {}
+            }
+        }
+        // 2) refs 命名空间下的字符串凭据（主要来源：DEEPSEEK_API_KEY 等）
+        if let Some(serde_yaml::Value::Mapping(src_refs)) = mapping.get(&refs_key) {
+            let target_refs_key = refs_key.clone();
+            let target_refs = target_map
+                .get_mut(&target_refs_key)
+                .and_then(|v| v.as_mapping_mut());
+            if let Some(target_refs) = target_refs {
+                for (k, v) in src_refs.iter() {
+                    let Some(key) = k.as_str() else { continue };
+                    if !v.is_string() {
+                        continue;
+                    }
+                    match target_refs.get(k) {
+                        None => {
+                            target_refs.insert(k.clone(), v.clone());
+                            report.copied.push(key.to_string());
+                            changed = true;
+                        }
+                        Some(existing) if existing != v => {
+                            report.conflicted.push(key.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        if changed {
+            // 写入前备份旧凭据
+            if target.exists() {
+                let bak = PathBuf::from(format!("{}.bak", target.display()));
+                let _ = std::fs::copy(&target, &bak);
+            }
+            if let Some(parent) = target.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let tmp = PathBuf::from(format!("{}.tmp", target.display()));
+            let _ = std::fs::write(
+                &tmp,
+                serde_yaml::to_string(&target_map).unwrap_or_default(),
+            );
+            // dsh 凭据安全校验要求 600（仅属主可读），否则拒绝启动
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+            }
+            let _ = std::fs::rename(&tmp, &target);
+        }
+        if changed || !report.conflicted.is_empty() {
+            info!(
+                "凭据单向同步：新增 {:?}，冲突跳过 {:?}",
+                report.copied, report.conflicted
+            );
+        }
+        report
+    }
+
+    /// 一键导出备份：当前 home（隔离/系统均不导出用户 home，仅导出**隔离** dsh-home 与凭据）+ config.json → zip
+    pub fn export_backup(&self, dest_zip: &Path) -> Result<String, String> {
+        use std::io::Write;
+        if let Some(parent) = dest_zip.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let file = std::fs::File::create(dest_zip).map_err(|e| e.to_string())?;
+        let mut zw = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        let mut count = 0usize;
+        add_dir_to_backup(&mut zw, &self.home_dir, &PathBuf::from("dsh-home"), &options, &mut count)?;
+        // 凭据（若在隔离 home 内则上面已包含；config.json 单独）
+        let cfg = self.data_dir.join("config.json");
+        if cfg.is_file() {
+            let data = std::fs::read(&cfg).map_err(|e| e.to_string())?;
+            zw.start_file("config.json", options).map_err(|e| e.to_string())?;
+            zw.write_all(&data).map_err(|e| e.to_string())?;
+            count += 1;
+        }
+        zw.finish().map_err(|e| e.to_string())?;
+        info!("已导出备份（{count} 个文件）→ {}", dest_zip.display());
+        Ok(dest_zip.to_string_lossy().into_owned())
+    }
+
+    /// 持久化 home 模式（"isolated" / "system"）
+    pub fn set_home_mode(&self, mode: &str) -> Result<(), String> {
+        let data_dir = self.data_dir.clone();
+        let mut settings = crate::settings::Settings::load(&data_dir).unwrap_or_default();
+        settings.home_mode = Some(mode.to_string());
+        settings.save(&data_dir).map_err(|e| format!("保存设置失败: {e}"))?;
+        self.use_system_home.store(mode == "system", Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// 完成首启向导标记
+    pub fn mark_setup_done(&self) -> Result<(), String> {
+        let data_dir = self.data_dir.clone();
+        let mut settings = crate::settings::Settings::load(&data_dir).unwrap_or_default();
+        settings.setup_done = true;
+        settings.save(&data_dir).map_err(|e| format!("保存设置失败: {e}"))
+    }
+}
+
+/// 递归把目录加入备份 zip（跳过符号链接与垃圾文件）
+fn add_dir_to_backup(
+    zw: &mut zip::ZipWriter<std::fs::File>,
+    dir: &std::path::Path,
+    rel: &Path,
+    options: &zip::write::SimpleFileOptions,
+    count: &mut usize,
+) -> Result<(), String> {
+    use std::io::Write;
+    let Ok(entries) = std::fs::read_dir(dir) else { return Ok(()) };
+    for entry in entries.flatten() {
+        let from = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&from) else { continue };
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        let name = entry.file_name();
+        if matches!(name.to_string_lossy().as_ref(), ".DS_Store" | "Thumbs.db" | "desktop.ini") {
+            continue;
+        }
+        let rel_path = rel.join(&name);
+        if meta.is_dir() {
+            add_dir_to_backup(zw, &from, &rel_path, options, count)?;
+        } else if meta.is_file() {
+            let mut data = Vec::new();
+            if std::fs::File::open(&from)
+                .and_then(|mut f| std::io::Read::read_to_end(&mut f, &mut data))
+                .is_err()
+            {
+                continue;
+            }
+            zw.start_file(rel_path.to_string_lossy().replace('\\', "/"), *options)
+                .map_err(|e| e.to_string())?;
+            zw.write_all(&data).map_err(|e| e.to_string())?;
+            *count += 1;
+        }
+    }
+    Ok(())
 }
 
 /// 递归复制目录（备份/迁移用）

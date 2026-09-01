@@ -142,6 +142,34 @@ listen('dsh-status', () => refreshPlugins());
 refresh();
 refreshPlugins();
 
+// ---------- 配置互通 ----------
+async function refreshInterop() {
+  try {
+    const s = await invoke('get_status');
+    $('home-mode').textContent = s.homeMode === 'system' ? '系统 ~/.dsh（直连）' : '隔离环境';
+    $('sys-home').textContent = s.systemHome || '（无）';
+  } catch (e) { /* 忽略 */ }
+}
+$('btn-sync-cred').addEventListener('click', async () => {
+  const hint = $('interop-hint');
+  hint.textContent = '正在单向同步系统凭据…';
+  try {
+    const r = await invoke('sync_credentials_now');
+    hint.textContent = `同步完成：新增 ${r.copied.length} 项，冲突跳过 ${r.conflicted.length} 项` +
+      (r.conflicted.length ? '（冲突值不覆盖，可手动处理）' : '');
+    refreshInterop();
+  } catch (e) { hint.textContent = '同步失败: ' + e; }
+});
+$('btn-export-backup').addEventListener('click', async () => {
+  const hint = $('interop-hint');
+  hint.textContent = '正在打包备份…';
+  try {
+    const path = await invoke('export_backup');
+    hint.textContent = '备份已导出: ' + path;
+  } catch (e) { hint.textContent = '导出失败: ' + e; }
+});
+refreshInterop();
+
 // ---------- Agent 预设 ----------
 async function refreshPresets() {
   const list = document.getElementById('preset-list');

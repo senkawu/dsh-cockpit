@@ -340,6 +340,81 @@ async fn check_and_prompt(app: &tauri::AppHandle, manager: &DshManager, manual: 
         });
 }
 
+/// 首启配置互通向导：检测到系统 ~/.dsh 且隔离 home 为空时询问用户
+///  ① 导入配置到隔离环境（复制凭据 + profile 补丁层，原目录不动，推荐）
+///  ② 保持隔离（默认 dsh-home）
+///  ③ 直接使用系统 ~/.dsh（命令行老用户，提示风险）
+async fn run_setup_wizard(app: &tauri::AppHandle, manager: &DshManager) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogResult};
+    info!("检测到系统 ~/.dsh 且隔离 home 为空，进入配置互通向导");
+    let (tx, rx) = tokio::sync::oneshot::channel::<u8>();
+    let app2 = app.clone();
+    app.dialog()
+        .message(
+            "检测到你已有系统级 DSH 配置（~/.dsh）。\n\n\
+             「导入配置」：把系统凭据与插件开关复制进隔离环境（推荐，原目录不动）；\n\
+             「保持隔离」：继续使用全新隔离环境（插件将自动安装，凭据可稍后同步）；\n\
+             「使用系统目录」：直接用 ~/.dsh 作为 DSH_HOME（适用于不想迁移的命令行老用户，\n\
+             注意：客户端不会修改系统文件，但与命令行实例并存时需自行注意并发）。",
+        )
+        .title("配置互通")
+        .buttons(MessageDialogButtons::YesNoCancelCustom(
+            "导入配置".into(),
+            "保持隔离".into(),
+            "使用系统目录".into(),
+        ))
+        .show_with_result(move |result| {
+            let choice = match &result {
+                MessageDialogResult::Yes => 0,
+                MessageDialogResult::No => 1,
+                _ => 2,
+            };
+            let _ = tx.send(choice);
+            let _ = app2;
+        });
+    match rx.await.unwrap_or(1) {
+        0 => {
+            // ① 导入：复制凭据 + profile 补丁层（原目录不动）
+            let sys_home = std::env::var("DSH_HOME").unwrap_or_else(|_| {
+                std::env::var("HOME").map(|h| format!("{h}/.dsh")).unwrap_or_default()
+            });
+            let sys_home = std::path::PathBuf::from(sys_home);
+            let cred = sys_home.join(".credentials.yaml");
+            let _ = manager.sync_credentials_from_system(); // 单向复制缺失键
+            if cred.is_file() && !manager.active_home().join(".credentials.yaml").exists() {
+                let _ = std::fs::copy(&cred, manager.active_home().join(".credentials.yaml"));
+            }
+            // profile 补丁层（插件开关等用户定制，小文件）
+            let sys_patch = sys_home.join("profiles").join("web").join("cordis.patch.yml");
+            if sys_patch.is_file() {
+                let dest = manager
+                    .active_home()
+                    .join("profiles")
+                    .join("web")
+                    .join("cordis.patch.yml");
+                if let Some(p) = dest.parent() {
+                    let _ = std::fs::create_dir_all(p);
+                }
+                let _ = std::fs::copy(&sys_patch, &dest);
+            }
+            manager.emit_status(app, "info", "已导入系统配置到隔离环境", None);
+        }
+        2 => {
+            // ③ 系统模式
+            if let Err(e) = manager.set_home_mode("system") {
+                warn!("切换系统模式失败: {e}");
+            } else {
+                manager.emit_status(app, "info", "已切换到系统 ~/.dsh 模式", None);
+            }
+        }
+        _ => {
+            // ② 保持隔离
+            manager.emit_status(app, "info", "保持隔离环境", None);
+        }
+    }
+    let _ = manager.mark_setup_done();
+}
+
 /// 后台更新检查循环：启动延迟 + jitter 后首次，之后每 6h 一次
 fn spawn_update_checker(app: &tauri::AppHandle, manager: &DshManager) {
     let app = app.clone();
@@ -392,6 +467,34 @@ async fn bootstrap(app: tauri::AppHandle) {
         }
         // 2) 安装内置插件（市场 + 鲸鱼挂件），失败不阻塞
         manager.install_plugins(&app).await;
+    }
+
+    // 2.5) 配置互通：首启向导（系统 ~/.dsh 存在且隔离 home 为空 → 三选一）
+    if !manager.safe_mode.load(Ordering::Relaxed)
+        && !manager.setup_done.load(Ordering::Relaxed)
+        && manager.system_home_exists()
+        && manager.isolated_home_empty()
+    {
+        run_setup_wizard(&app, &manager).await;
+    }
+    // 2.6) 凭据单向同步（safe-mode 停用；系统模式无需同步）
+    if !manager.safe_mode.load(Ordering::Relaxed)
+        && manager.sync_credentials.load(Ordering::Relaxed)
+        && !manager.use_system_home.load(Ordering::Relaxed)
+    {
+        let report = manager.sync_credentials_from_system();
+        if !report.copied.is_empty() || !report.conflicted.is_empty() {
+            manager.emit_status(
+                &app,
+                "info",
+                &format!(
+                    "凭据同步完成：新增 {} 项，冲突跳过 {} 项",
+                    report.copied.len(),
+                    report.conflicted.len()
+                ),
+                None,
+            );
+        }
     }
 
     // 3) 启动 dsh web 服务并加载 UI
@@ -627,6 +730,9 @@ pub fn run() {
             commands::list_presets,
             commands::export_preset,
             commands::import_preset,
+            commands::sync_credentials_now,
+            commands::export_backup,
+            commands::set_home_mode,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

@@ -319,3 +319,43 @@ pub async fn import_preset(
     let src = rx.await.ok().flatten().ok_or("已取消导入")?;
     crate::preset::import_preset(&crate::preset::presets_root(&m), &src)
 }
+
+// ---------------------------------------------------------------------------
+// 配置互通（home 模式 / 凭据同步 / 备份导出）
+// ---------------------------------------------------------------------------
+
+/// 手动触发凭据单向同步，返回报告
+#[tauri::command]
+pub fn sync_credentials_now(manager: State<'_, DshManager>) -> crate::dsh::CredentialSyncReport {
+    manager.inner().sync_credentials_from_system()
+}
+
+/// 一键导出备份（隔离 dsh-home + 凭据 + config.json → zip），原生保存对话框
+#[tauri::command]
+pub async fn export_backup(
+    app: AppHandle,
+    manager: State<'_, DshManager>,
+) -> Result<String, String> {
+    use std::path::PathBuf;
+    use tauri_plugin_dialog::{DialogExt, FilePath};
+    let m = manager.inner().clone();
+    let (tx, rx) = tokio::sync::oneshot::channel::<Option<PathBuf>>();
+    app.dialog()
+        .file()
+        .set_file_name("dsh-cockpit-backup.zip")
+        .add_filter("ZIP 备份", &["zip"])
+        .save_file(move |path| {
+            let _ = tx.send(match path {
+                Some(FilePath::Path(p)) => Some(p.into()),
+                _ => None,
+            });
+        });
+    let dest = rx.await.ok().flatten().ok_or("已取消导出")?;
+    m.export_backup(&dest)
+}
+
+/// 切换 home 模式（isolated / system），并返回是否需重启服务生效
+#[tauri::command]
+pub fn set_home_mode(manager: State<'_, DshManager>, mode: String) -> Result<(), String> {
+    manager.inner().set_home_mode(&mode)
+}
