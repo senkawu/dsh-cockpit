@@ -16,6 +16,8 @@
 //!   - 插件补丁层写入安全化（备份 + 校验回滚）
 
 mod commands;
+mod deep_link;
+mod inject;
 mod preset;
 mod dsh;
 mod npm;
@@ -113,7 +115,13 @@ fn create_main_window(app: &tauri::AppHandle) -> Result<WebviewWindow, Box<dyn s
         })
         .on_page_load(|win, payload| {
             use tauri::webview::PageLoadEvent;
-            match payload.event() {
+            let safe = win
+                .app_handle()
+                .state::<DshManager>()
+                .safe_mode
+                .load(Ordering::Relaxed);
+            let ev = payload.event();
+            match ev {
                 // 页面脚本执行前注入语言，让 dsh UI 使用中文
                 PageLoadEvent::Started => {
                     let _ = win.eval(FORCE_ZH_LOCALE_JS);
@@ -122,6 +130,8 @@ fn create_main_window(app: &tauri::AppHandle) -> Result<WebviewWindow, Box<dyn s
                     let _ = win.eval(BLOCK_DEVTOOLS_KEYS_JS);
                 }
             }
+            // P4 注入清单（版本化；safe-mode 关闭）
+            inject::run_injections(&win, &ev, safe);
         })
         .build()?;
 
@@ -629,6 +639,16 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let safe_mode = std::env::args().any(|a| a == "--safe-mode")
         || std::env::var("DSH_SAFE_MODE").map(|v| v == "1").unwrap_or(false);
 
+    // P2c 深链/文件关联（三种来源统一入口）：
+    // 1) 启动时命令行参数（Windows/Linux 文件关联双击 / 深链单参数）
+    for arg in std::env::args().skip(1) {
+        if !arg.starts_with("--") {
+            deep_link::handle_incoming(&handle, &arg);
+        }
+    }
+    // （运行期深链：macOS 走 RunEvent::Opened；Windows/Linux 由
+    //   single-instance 回调把 argv 转发到 handle_incoming，见下方插件注册）
+
     // 初始化隔离环境目录 + 管理对象
     let manager = DshManager::new(&handle)?;
     manager.safe_mode.store(safe_mode, Ordering::Relaxed);
@@ -704,6 +724,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 pub fn run() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
@@ -718,9 +739,14 @@ pub fn run() {
                 ])
                 .build(),
         )
-        // 单实例锁：重复启动时聚焦已有主窗口
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        // 单实例锁：重复启动时聚焦已有主窗口；深链/文件参数转发给运行中的实例
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             tray::show_main_window(app);
+            for arg in argv.iter().skip(1) {
+                if !arg.starts_with("--") {
+                    deep_link::handle_incoming(app, arg);
+                }
+            }
         }))
         .setup(setup)
         .invoke_handler(tauri::generate_handler![
@@ -759,7 +785,14 @@ pub fn run() {
             // 必须用属性 cfg 包裹，否则交叉编译失败。
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => show_or_recreate_main(handle),
-            tauri::RunEvent::Exit => {
+            // macOS/iOS：系统通过深链或文件关联唤起（URL 或 file:// 路径）。
+            // 与 Reopen 同理，该变体仅在部分平台存在，用属性 cfg 包裹。
+            #[cfg(any(target_os = "macos", target_os = "ios", target_os = "android"))]
+            tauri::RunEvent::Opened { urls } => {
+                for url in urls {
+                    deep_link::handle_incoming(handle, url.as_str());
+                }
+            }            tauri::RunEvent::Exit => {
                 if let Some(m) = handle.try_state::<DshManager>() {
                     let _ = m.inner().kill_managed_now();
                 }

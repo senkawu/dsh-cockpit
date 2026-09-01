@@ -27,6 +27,7 @@
 | 🌐 | **国内网络友好** | 内核与插件全部走 npmmirror 镜像；GitHub 源插件可一键挂镜像加速 |
 | 🐋 | **三款内置插件** | 插件市场、小鲸鱼余额挂件、用量统计面板——开箱即用，面板一键开关 |
 | 🖥️ | **原生桌面体验** | 托盘驻留、关闭最小化、单实例、Dock 重新激活、崩溃自恢复 |
+| 🔗 | **深链与文件关联** | `.dshpreset` 双击即导入向导；`dsh-cockpit://import?path=...` 深链一键导入 |
 | 🔒 | **安全边界** | 右键 Inspect 全面屏蔽；外部链接一律转系统浏览器；`--safe-mode` 故障恢复 |
 | 🇨🇳 | **零依赖开箱** | 用户无需安装 Node / pnpm / Git——Node 运行时**按需加载**：系统 Node ≥24 优先，否则自动下载到应用数据目录（sha256 校验） |
 
@@ -112,8 +113,10 @@ npx tauri build --bundles deb,rpm   # Linux（需 Linux 机器）
 
 ## 🧠 桌面宿主能力
 
-- **更新策略**：启动后延迟+抖动后台检查，每 6 小时复查；三选一「立即更新 / 跳过此版本 / 稍后」，跳过项持久化，手动检查不受影响
+- **更新策略（双通道）**：内核随 npm 更新（启动延迟+抖动检查、三选一、跳过持久化）；外壳随 GitHub Release 更新（`tauri-plugin-updater`，面板「检查外壳更新」按钮，签名校验）
 - **进程治理**：退出时优雅停止自管的 dsh 子进程（SIGTERM → 兜底强杀）；**绝不误杀外部 dsh**（端口占用时走"附加模式"）
+- **深链 / 文件关联**：注册 `dsh-cockpit://` scheme 与 `.dshpreset` 扩展名——双击预设文件或点击深链即弹出导入向导（确认 → 校验 → 安装 → 结果弹窗），macOS 走系统 `Opened` 事件、Windows/Linux 走命令行参数与单实例转发
+- **UI 注入清单**：版本化 JS 注入层（`trace-zh` 轨迹面板字段汉化，MutationObserver 动态渲染；`--safe-mode` 整体关闭、失败静默降级）
 - **安全模式**：`--safe-mode` 以仅含官方核心 bundle 的隔离 profile 启动，用于排查第三方插件故障；面板可一键退出
 - **窗口恢复**：主窗口意外销毁后自动重建（限频防抖）；Dock 点击 / 托盘点击均可靠唤回
 - **导航守卫**：仅允许加载客户端页面与本机服务，外部链接一律交系统浏览器
@@ -132,6 +135,8 @@ dsh-cockpit/
     └── src/
         ├── lib.rs                # 入口、窗口、托盘、菜单、更新检查
         ├── dsh.rs                # DSH 内核管理：安装/更新/回退/冒烟/插件开关
+        ├── deep_link.rs          # P2c 深链/文件关联 → .dshpreset 导入向导
+        ├── inject.rs             # P4 UI 注入清单（轨迹汉化等版本化脚本）
         ├── npm.rs                # 经运行时 node 执行 pnpm
         ├── process_mgr.rs        # 子进程生命周期 + 端口探测 + Node 按需加载
         └── commands.rs           # 控制面板 IPC
@@ -149,6 +154,7 @@ dsh-cockpit/
 2. **网络波动**：版本查询 / 安装失败仅提示不阻塞，继续使用已装版本；registry 可随时切换镜像
 3. **强杀兜底**：SIGTERM 后 3 秒未退出将 SIGKILL，极端情况下会话落盘可能不完整
 4. **平台差异**：Windows 需 WebView2（Win10/11 自带）；Linux 包需在 Linux 上构建
+5. **外壳自更新范围**：`tauri-plugin-updater` 覆盖 macOS（app）/ Windows（NSIS）；Linux deb/rpm 与 macOS dmg 走手动下载安装（tauri 平台限制，见 2.9）
 
 ## 📄 License
 

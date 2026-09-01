@@ -17,8 +17,18 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "resources": [
       "pnpm"
+    ],
+    "fileAssociations": [
+      {
+        "ext": ["dshpreset"],
+        "name": "DSH-Cockpit Agent 预设",
+        "description": "DSH Agent Preset（.dshpreset）",
+        "mimeType": "application/zip",
+        "role": "Editor"
+      }
     ],
     "icon": [
       "icons/32x32.png",
@@ -58,11 +68,16 @@
     }
   },
   "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["dsh-cockpit"]
+      }
+    },
     "updater": {
       "endpoints": [
-        "https://example.com/updates/{{target}}/{{arch}}/{{current_version}}"
+        "https://github.com/senkawu/dsh-cockpit/releases/latest/download/{{target}}-{{arch}}.json"
       ],
-      "pubkey": "REPLACE_WITH_TAURI_SIGNING_PUBKEY"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIwODk4N0VDOThBMkJERTQKUldUa3ZhS1k3SWVKSUdqQk40NDRhMVVLTm1QOFZsT3JrRi9RejdYWURRUUFmL0JhenhsZ2l1MXgK"
     }
   }
 }

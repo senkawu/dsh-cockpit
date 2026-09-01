@@ -1,6 +1,9 @@
 # 一站式构建：macOS(arm64/x64) / Windows(x64/arm64) / Debian(deb) / RedHat(rpm)
 # 用法：推送到 GitHub 后在 Actions 页面手动 Run workflow，或 push 自动触发；
 #      完成后在每次运行的 Artifacts 里下载安装包。
+# 外壳自更新：bundle.createUpdaterArtifacts=true 时各平台产出 .sig 签名文件，
+#      release job 生成 JSON 清单（{{target}}-{{arch}}-{{current_version}}.json）并
+#      与安装包一起挂到 GitHub Release，tauri-plugin-updater 据此完成外壳升级。
 name: build
 
 on:
@@ -24,11 +27,17 @@ jobs:
         with: { node-version: 24 }
       - run: npm install
       - run: npx tauri build --bundles app,dmg
-        env: { DSH_NODE_MIRROR: "https://cdn.npmmirror.com/binaries/node", DSH_REGISTRY: "https://registry.npmmirror.com" }
+        env:
+          DSH_REGISTRY: "https://registry.npmmirror.com"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - uses: actions/upload-artifact@v4
         with:
           name: macos-arm64
-          path: src-tauri/target/release/bundle/dmg/*.dmg
+          path: |
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/macos/*.tar.gz
+            src-tauri/target/release/bundle/macos/*.sig
 
   mac-x64:
     name: macOS Intel (dmg)
@@ -42,11 +51,17 @@ jobs:
         with: { node-version: 24 }
       - run: npm install
       - run: npx tauri build --bundles app,dmg
-        env: { DSH_NODE_MIRROR: "https://cdn.npmmirror.com/binaries/node", DSH_REGISTRY: "https://registry.npmmirror.com" }
+        env:
+          DSH_REGISTRY: "https://registry.npmmirror.com"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - uses: actions/upload-artifact@v4
         with:
           name: macos-x64
-          path: src-tauri/target/release/bundle/dmg/*.dmg
+          path: |
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/macos/*.tar.gz
+            src-tauri/target/release/bundle/macos/*.sig
 
   win-x64:
     name: Windows x64 (NSIS)
@@ -59,11 +74,16 @@ jobs:
         with: { node-version: 24 }
       - run: npm install
       - run: npx tauri build --bundles nsis
-        env: { DSH_NODE_MIRROR: "https://cdn.npmmirror.com/binaries/node", DSH_REGISTRY: "https://registry.npmmirror.com" }
+        env:
+          DSH_REGISTRY: "https://registry.npmmirror.com"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x64
-          path: src-tauri/target/release/bundle/nsis/*.exe
+          path: |
+            src-tauri/target/release/bundle/nsis/*.exe
+            src-tauri/target/release/bundle/nsis/*.sig
 
   win-arm64:
     name: Windows ARM64 (NSIS)
@@ -81,12 +101,15 @@ jobs:
           DSH_TARGET_TRIPLE: aarch64-pc-windows-msvc
           DSH_TARGET_PLATFORM: win
           DSH_TARGET_ARCH: arm64
-          DSH_NODE_MIRROR: "https://cdn.npmmirror.com/binaries/node"
           DSH_REGISTRY: "https://registry.npmmirror.com"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - uses: actions/upload-artifact@v4
         with:
           name: windows-arm64
-          path: src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.exe
+          path: |
+            src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.exe
+            src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.sig
 
   linux-deb:
     name: Debian/Ubuntu (deb)
@@ -100,11 +123,16 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libappindicator3-dev libsoup-3.0-dev libssl-dev
       - run: npm install
       - run: npx tauri build --bundles deb
-        env: { DSH_NODE_MIRROR: "https://cdn.npmmirror.com/binaries/node", DSH_REGISTRY: "https://registry.npmmirror.com" }
+        env:
+          DSH_REGISTRY: "https://registry.npmmirror.com"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - uses: actions/upload-artifact@v4
         with:
           name: linux-deb
-          path: src-tauri/target/release/bundle/deb/*.deb
+          path: |
+            src-tauri/target/release/bundle/deb/*.deb
+            src-tauri/target/release/bundle/deb/*.sig
 
   linux-rpm:
     name: RedHat/Fedora (rpm)
@@ -118,13 +146,18 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libappindicator3-dev libsoup-3.0-dev libssl-dev rpm
       - run: npm install
       - run: npx tauri build --bundles rpm
-        env: { DSH_NODE_MIRROR: "https://cdn.npmmirror.com/binaries/node", DSH_REGISTRY: "https://registry.npmmirror.com" }
+        env:
+          DSH_REGISTRY: "https://registry.npmmirror.com"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - uses: actions/upload-artifact@v4
         with:
           name: linux-rpm
-          path: src-tauri/target/release/bundle/rpm/*.rpm
+          path: |
+            src-tauri/target/release/bundle/rpm/*.rpm
+            src-tauri/target/release/bundle/rpm/*.sig
 
-  # 全部构建成功后：打标签并创建 GitHub Release，挂载 6 个安装包
+  # 全部构建成功后：打标签并创建 GitHub Release，挂载安装包 + 生成 updater JSON 清单
   release:
     name: 📦 发布 GitHub Release
     runs-on: ubuntu-latest
@@ -147,19 +180,81 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="v$(node -p "require('./package.json').version")"
+          SHORT="${VERSION#v}"
           if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "::notice::Release $VERSION 已存在，跳过创建"
             exit 0
           fi
-          # 收集实际构建成功的安装包（mac 未就绪时只发已有平台）
-          FILES=$(find artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.deb' -o -name '*.rpm' \))
+          # 收集实际构建成功的安装包（mac 未就绪时只发已有平台）；
+          # 含 updater 用的 .app.tar.gz（清单 URL 指向 release 上的该文件）
+          FILES=$(find artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.deb' -o -name '*.rpm' -o -name '*.app.tar.gz' -o -name '*.tar.gz' \))
           echo "待上传: $FILES"
+          # 生成 updater 清单（每个平台一个 JSON，命名与 tauri.conf 的 endpoint 模板一致：
+          # {{target}}-{{arch}}.json；固定名保证任意旧版本用户都能从 latest 拉到最新清单）。
+          python3 - <<'PYEOF'
+          import json, os, glob, datetime
+          artifacts_dir = "artifacts"
+          version = "$SHORT"
+          entries = {}  # target -> {url, signature}
+          # 收集所有 .sig（文件名 = 安装包名 + .sig）
+          sigs = {}
+          for p in glob.glob(artifacts_dir + "/**/*.sig", recursive=True):
+              sigs[os.path.basename(p)[:-4]] = open(p).read().strip()
+          # 匹配安装包与其签名（按文件名对应关系；tauri 产物：<产品>_<ver>_<target>_<arch>.<ext>）
+          installer_exts = (".app.tar.gz", ".exe", ".deb", ".rpm")
+          files = []
+          for ext in installer_exts:
+              files += glob.glob(artifacts_dir + "/**/*" + ext, recursive=True)
+          # 目标 triple 推导：tauri 产物名不含完整 triple（如 DSH-Cockpit.app.tar.gz、
+          # dsh-cockpit_0.2.1_arm64-setup.exe），架构以 upload-artifact 的目录名判定
+          # （macos-arm64 / macos-x64 / windows-x64 / windows-arm64 / linux-deb / linux-rpm）。
+          def guess_target(f):
+              p = f.replace("\\", "/").lower()
+              n = os.path.basename(f).lower()
+              if "/macos-arm64/" in p: return "aarch64-apple-darwin"
+              if "/macos-x64/" in p: return "x86_64-apple-darwin"
+              if "/windows-arm64/" in p or ("arm64" in n and n.endswith(".exe")): return "aarch64-pc-windows-msvc"
+              if "/windows-x64/" in p: return "x86_64-pc-windows-msvc"
+              if "/linux-deb/" in p: return "x86_64-unknown-linux-gnu"
+              if "/linux-rpm/" in p: return "x86_64-unknown-linux-gnu"
+              return None
+          for f in files:
+              name = os.path.basename(f)
+              target = guess_target(f)
+              if not target or target in entries:
+                  continue
+              signature = sigs.get(name, "")
+              if not signature:
+                  print(f"::warning::缺少签名文件: {name}")
+                  continue
+              url = f"https://github.com/{os.environ.get('GITHUB_REPOSITORY','')}/releases/latest/download/{name}"
+              entries[target] = {"url": url, "signature": signature}
+              print(f"::notice::updater 条目 {target} <- {name}")
+          if not entries:
+              print("::warning::未找到任何 updater 安装包/签名，跳过清单生成")
+              exit(0)
+          manifest = {
+              "version": version,
+              "notes": "DSH-Cockpit 外壳更新",
+              "pub_date": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+              "platforms": entries,
+          }
+          os.makedirs("update-json", exist_ok=True)
+          for target in entries:
+              arch = "aarch64" if "aarch64" in target else "x86_64"
+              fn = f"{target}-{arch}.json"
+              with open(os.path.join("update-json", fn), "w") as fh:
+                  json.dump(manifest, fh, indent=2)
+              print(f"::notice::生成 updater 清单 {fn}")
+          PYEOF
+          JSON_FILES=$(find update-json -name '*.json' 2>/dev/null || true)
+          echo "清单: $JSON_FILES"
           # 打标签（若不存在则指向当前提交）并上传。
           # 注意：--notes 与 --generate-notes 互斥，只用自动生成。
           git tag "$VERSION" || true
           git push origin "$VERSION" || true
           # shellcheck disable=SC2086
-          gh release create "$VERSION" $FILES \
+          gh release create "$VERSION" $FILES $JSON_FILES \
             --repo "$GITHUB_REPOSITORY" \
             --title "DSH-Cockpit $VERSION" \
             --generate-notes
