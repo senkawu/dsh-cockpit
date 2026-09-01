@@ -72,13 +72,12 @@ fn navigation_allowed(app: &tauri::AppHandle, url: &tauri::Url) -> bool {
     false
 }
 
-/// 屏蔽右键菜单与 Inspect：每次页面加载完成都注入拦截脚本
-/// （覆盖状态页/控制面板/以及导航过去的 dsh 页面）。
-const BLOCK_CONTEXT_MENU_JS: &str = r#"
+/// 屏蔽 DevTools 快捷键（**不**拦截右键菜单——Inspect 由 devtools(false) 原生屏蔽，
+/// WebView2 右键菜单里的 Inspect 项随之消失；拦截 contextmenu 会把复制/粘贴等右键功能一起干掉）。
+const BLOCK_DEVTOOLS_KEYS_JS: &str = r#"
   (function(){
-    document.addEventListener('contextmenu', function(e){ e.preventDefault(); return false; }, true);
     document.addEventListener('keydown', function(e){
-      // 屏蔽 DevTools 快捷键（mac: Cmd+Opt+I/J/C；win: F12 / Ctrl+Shift+I/J/C）
+      // mac: Cmd+Opt+I/J/C；win: F12 / Ctrl+Shift+I/J/C
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && ['I','J','C'].includes(String(e.key).toUpperCase())) { e.preventDefault(); return false; }
       if (e.key === 'F12') { e.preventDefault(); return false; }
     }, true);
@@ -93,7 +92,7 @@ fn create_main_window(app: &tauri::AppHandle) -> Result<WebviewWindow, Box<dyn s
         .min_inner_size(940.0, 600.0)
         .center()
         .visible(true)
-        .devtools(false) // 禁用开发者工具（配合 JS 拦截，彻底屏蔽 Inspect）
+        .devtools(false) // 禁用开发者工具（原生屏蔽 Inspect，保留右键复制粘贴）
         .on_navigation(move |url| navigation_allowed(&app_for_nav, url))
         .on_new_window(move |url, _features| {
             let target = url.to_string();
@@ -103,7 +102,7 @@ fn create_main_window(app: &tauri::AppHandle) -> Result<WebviewWindow, Box<dyn s
         .on_page_load(|win, payload| {
             use tauri::webview::PageLoadEvent;
             if matches!(payload.event(), PageLoadEvent::Finished) {
-                let _ = win.eval(BLOCK_CONTEXT_MENU_JS);
+                let _ = win.eval(BLOCK_DEVTOOLS_KEYS_JS);
             }
         })
         .build()?;
@@ -382,9 +381,27 @@ fn build_app_menu(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Erro
     let panel = MenuItem::with_id(app, "panel", "控制面板", true, None::<&str>)?;
     let quit = PredefinedMenuItem::quit(app, Some("退出"))?;
 
+    // 标准「编辑」菜单：macOS 的 Cmd+C/V/X/Z/A 依赖菜单角色路由，缺失则快捷键失灵
+    let sep = PredefinedMenuItem::separator(app)?;
+    let edit_menu = Submenu::with_items(
+        app,
+        "编辑",
+        true,
+        &[
+            &PredefinedMenuItem::undo(app, Some("撤销"))?,
+            &PredefinedMenuItem::redo(app, Some("重做"))?,
+            &sep,
+            &PredefinedMenuItem::cut(app, Some("剪切"))?,
+            &PredefinedMenuItem::copy(app, Some("复制"))?,
+            &PredefinedMenuItem::paste(app, Some("粘贴"))?,
+            &sep,
+            &PredefinedMenuItem::select_all(app, Some("全选"))?,
+        ],
+    )?;
+
     let app_menu = Submenu::with_items(app, "DSH-Cockpit", true, &[&about, &quit])?;
     let dsh_menu = Submenu::with_items(app, "DSH", true, &[&check, &restart, &safe, &logs, &panel])?;
-    let menu = Menu::with_items(app, &[&app_menu, &dsh_menu])?;
+    let menu = Menu::with_items(app, &[&app_menu, &edit_menu, &dsh_menu])?;
     app.set_menu(menu)?;
 
     app.on_menu_event(|app, event| match event.id().as_ref() {
