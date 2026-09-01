@@ -98,17 +98,13 @@ jobs:
         with:
           path: artifacts
           merge-multiple: false
-      - name: 创建 / 更新 Release（同版本已存在则跳过，避免重复发布）
+      - name: 创建 / 更新 Release（存在则补传资产，避免空 Release）
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           VERSION="v$(node -p "require('./package.json').version")"
           SHORT="${VERSION#v}"
-          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "::notice::Release $VERSION 已存在，跳过创建"
-            exit 0
-          fi
           # 收集安装包（含 updater 用的 .app.tar.gz，清单 URL 指向它）
           FILES=$(find artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.app.tar.gz' -o -name '*.tar.gz' \))
           echo "待上传: $FILES"
@@ -162,11 +158,20 @@ jobs:
           PYEOF
           JSON_FILES=$(find update-json -name '*.json' 2>/dev/null || true)
           echo "清单: $JSON_FILES"
-          git tag "$VERSION" || true
-          git push origin "$VERSION" || true
-          # shellcheck disable=SC2086
-          gh release create "$VERSION" $FILES $JSON_FILES \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "DSH-Cockpit $VERSION" \
-            --generate-notes
-          echo "::notice::已发布 Release $VERSION"
+          # Release 存在 → 补传缺失资产；不存在 → 打标签并创建
+          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "::notice::Release $VERSION 已存在，补传缺失资产"
+            for f in $FILES $JSON_FILES; do
+              gh release upload "$VERSION" "$f" --repo "$GITHUB_REPOSITORY" --clobber \
+                || echo "::warning::上传失败（可能已存在）: $f"
+            done
+          else
+            git tag "$VERSION" || true
+            git push origin "$VERSION" || true
+            # shellcheck disable=SC2086
+            gh release create "$VERSION" $FILES $JSON_FILES \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "DSH-Cockpit $VERSION" \
+              --generate-notes
+          fi
+          echo "::notice::Release $VERSION 就绪"
