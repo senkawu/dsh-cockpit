@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "dsh-cockpit"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "flate2",
  "hex",
@@ -968,7 +968,6 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
- "thiserror 2.0.20",
  "tokio",
  "url",
  "zip 2.4.2",
