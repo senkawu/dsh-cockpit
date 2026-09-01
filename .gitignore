@@ -6,3 +6,7 @@ src-tauri/pnpm/
 src-tauri/.node-build/
 *.log
 .DS_Store
+
+# 本机构建产物（dmg 安装包）
+*.dmg
+*.dmg.sha256

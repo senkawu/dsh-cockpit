@@ -9,7 +9,8 @@
   <main class="panel">
     <h1><img src="logo.png" class="panel-logo" alt="" /> DSH-Cockpit <span id="app-version" class="ver"></span></h1>
     <p class="sub">外壳与 DSH 内核解耦 · 隔离 pnpm 环境</p>
-    <div id="safe-banner" class="safe-banner" hidden>⚠ 安全模式运行中（第三方插件已停用）
+    <div id="safe-banner" class="safe-banner" hidden>⚠ 安全模式运行中：仅官方核心 bundle
+      <span id="safe-plugins-list" class="safe-plugins"></span>
       <button id="btn-exit-safe" class="mini">退出安全模式并重启</button>
     </div>
 
@@ -33,6 +34,11 @@
         <span>启动时自动检查 DSH 更新</span>
         <input type="checkbox" id="auto-check" />
       </label>
+      <label class="row switch">
+        <span>开机自启（登录后自动运行）</span>
+        <input type="checkbox" id="autostart" />
+      </label>
+      <div id="autostart-hint" class="hint"></div>
       <div class="row"><span>npm registry</span><b id="registry">—</b></div>
     </section>
 

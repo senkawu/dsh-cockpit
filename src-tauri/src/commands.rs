@@ -365,3 +365,26 @@ pub async fn export_backup(
 pub fn set_home_mode(manager: State<'_, DshManager>, mode: String) -> Result<(), String> {
     manager.inner().set_home_mode(&mode)
 }
+
+// ---------------------------------------------------------------------------
+// P4 2.10 开机自启（tauri-plugin-autostart）
+// ---------------------------------------------------------------------------
+
+/// 查询开机自启状态
+#[tauri::command]
+pub fn get_autostart(app: AppHandle) -> bool {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().unwrap_or(false)
+}
+
+/// 设置开机自启
+#[tauri::command]
+pub fn set_autostart(app: AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let mgr = app.autolaunch();
+    if enabled {
+        mgr.enable().map_err(|e| format!("开启开机自启失败: {e}"))
+    } else {
+        mgr.disable().map_err(|e| format!("关闭开机自启失败: {e}"))
+    }
+}

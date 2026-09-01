@@ -35,6 +35,10 @@ thiserror = "2"
 tokio = { version = "1", features = ["time", "net", "macros", "rt-multi-thread", "sync"] }
 tauri-plugin-deep-link = "2"
 url = "2.5.8"
+tauri-plugin-notification = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-window-state = "2"
 
 [profile.release]
 strip = true

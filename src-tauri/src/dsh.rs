@@ -27,6 +27,76 @@ use crate::settings::Settings;
 
 pub const DSH_PACKAGE: &str = "@deepseek-ai/dsh";
 
+/// P4 2.6 兼容矩阵：已知破坏性版本段（CLI/端口/存储格式不兼容），
+/// 命中时更新确认弹窗降级为黄色警告，避免用户升级后"变砖"。
+/// 每项：范围（semver 表达式，与 installed 版本比较）+ 原因说明。
+/// 维护方式：dsh 上游发布破坏性版本时在此追加，随外壳版本更新。
+pub const KNOWN_INCOMPATIBLE: &[(&str, &str)] = &[
+    // 示例（按需增删，实际以 dsh 上游变更记录为准）：
+    // ("0.2.0 - 0.2.x", "0.3 起 CLI 参数 --port 更名 --listen，隔离环境需同步升级"),
+];
+
+/// 判断待升级版本是否命中兼容矩阵（命中返回原因，未命中返回 None）
+pub fn incompatible_reason(latest: &str) -> Option<String> {
+    for (range, reason) in KNOWN_INCOMPATIBLE {
+        // 简化的段匹配：latest 主版本号落在此范围内即命中
+        if semver_range_match(latest, range) {
+            return Some((*reason).to_string());
+        }
+    }
+    None
+}
+
+/// 极简 semver 范围匹配："a - b"（含端点）或 ">=a" / "<b" 形式。
+/// 解析失败按未命中处理（不阻塞升级判断）。
+fn semver_range_match(version: &str, range: &str) -> bool {
+    let v = match semver::Version::parse(version.trim_start_matches('v')) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let range = range.trim();
+    if let Some((lo, hi)) = range.split_once(" - ") {
+        let lo_ok = semver::Version::parse(lo.trim()).map(|l| v >= l).unwrap_or(false);
+        let hi_ok = semver::Version::parse(hi.trim()).map(|h| v <= h).unwrap_or(false);
+        return lo_ok && hi_ok;
+    }
+    if let Some(hi) = range.strip_prefix('<') {
+        return semver::Version::parse(hi.trim()).map(|h| v < h).unwrap_or(false);
+    }
+    if let Some(lo) = range.strip_prefix('>') {
+        return semver::Version::parse(lo.trim()).map(|l| v > l).unwrap_or(false);
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn range_matching() {
+        // "a - b" 含端点
+        assert!(semver_range_match("0.2.3", "0.2.0 - 0.2.9"));
+        assert!(semver_range_match("0.2.0", "0.2.0 - 0.2.9"));
+        assert!(semver_range_match("0.2.9", "0.2.0 - 0.2.9"));
+        assert!(!semver_range_match("0.3.0", "0.2.0 - 0.2.9"));
+        // "<" / ">"
+        assert!(semver_range_match("0.1.5", "<0.2.0"));
+        assert!(!semver_range_match("0.2.0", "<0.2.0"));
+        assert!(semver_range_match("0.3.0", ">0.2.0"));
+        // 非法版本/范围 → 不命中
+        assert!(!semver_range_match("not-a-version", "0.2.0 - 0.2.9"));
+        assert!(!semver_range_match("0.2.1", "garbage"));
+    }
+
+    #[test]
+    fn incompatible_matrix_empty_by_default() {
+        // 矩阵为空时任何版本都不命中
+        assert_eq!(incompatible_reason("0.3.0"), None);
+        assert_eq!(incompatible_reason("99.0.0"), None);
+    }
+}
+
 /// 内置插件：插件市场 / 小鲸鱼余额挂件 / 用量统计面板。
 /// 三者均已发布到 npm（registry 默认走 npmmirror，国内无需访问 GitHub）。
 pub const PLUGIN_MARKET: &str = "dsh-market"; // bundle 行 id
@@ -35,6 +105,8 @@ pub const PLUGIN_WHALE: &str = "dsh-whale-widget"; // bundle 行 id == npm 包�
 pub const PLUGIN_WHALE_SRC: &str = "dsh-whale-widget"; // npm 包名（0.2.10 起已发布到 npm）
 pub const PLUGIN_USAGE: &str = "usage-stats"; // bundle 行 id
 pub const PLUGIN_USAGE_PKG: &str = "dsh-usage-statistics-panel"; // npm 包名
+pub const PLUGIN_NAVIGATOR: &str = "dsh-conversation-navigator"; // bundle 行 id == npm 包名
+pub const PLUGIN_NAVIGATOR_PKG: &str = "dsh-conversation-navigator"; // npm 包名
 
 /// npm 12 的 allowScripts 白名单：dsh 依赖树里需要跑安装脚本的原生包。
 /// 裸包名 = 按名字允许任意版本（防 npm 12 默认拦截导致 koffi.node 缺失）。
@@ -650,6 +722,24 @@ impl DshManager {
             self.active_port.store(ready_port, Ordering::Relaxed);
             info!("dsh web 就绪: http://127.0.0.1:{}", ready_port);
             self.emit_status(app, "ready", &format!("http://127.0.0.1:{}", ready_port), None);
+            // P4 2.10：托盘 tooltip 动态显示版本与端口
+            if let Some(tray) = app.tray_by_id("main-tray") {
+                let tip = format!(
+                    "DSH-Cockpit · dsh {} · 127.0.0.1:{}",
+                    self.installed_version().unwrap_or_else(|| "?".into()),
+                    ready_port
+                );
+                let _ = tray.set_tooltip(Some(tip));
+            }
+            // P4 2.5.3-3：首次就绪发系统通知（防打扰：仅当窗口未聚焦且本次是新启动时）
+            if self.last_start_at.load(Ordering::Relaxed) != 0
+                && app
+                    .get_webview_window("main")
+                    .map(|w| !w.is_focused().unwrap_or(true))
+                    .unwrap_or(true)
+            {
+                crate::host_ext::notify_ready(app, ready_port);
+            }
             self.navigate_main(app);
             Ok(())
         } else {
@@ -698,6 +788,8 @@ impl DshManager {
                 MessageDialogButtons::OkCancelCustom("立即重启".into(), "稍后处理".into()),
             )
         };
+        // P4 2.5.3-3：系统通知（弹窗外再加一道提醒）
+        crate::host_ext::notify_crash(app, &format!("退出码 {code}（连续 {count} 次）"));
         app.dialog()
             .message(msg)
             .title(title)
@@ -1089,7 +1181,7 @@ impl DshManager {
         }
     }
 
-    /// 安装内置插件（插件市场 + 小鲸鱼挂件 + 用量统计面板）。
+    /// 安装内置插件（插件市场 + 小鲸鱼挂件 + 用量统计面板 + 导航条）。
     /// 全部走 npm registry（默认 npmmirror，国内无需访问 GitHub）；幂等：已装则跳过。
     /// 失败不阻塞（插件是可选增强，dsh 仍可正常启动）。
     pub async fn install_plugins(&self, app: &AppHandle) {
@@ -1097,6 +1189,7 @@ impl DshManager {
             (PLUGIN_MARKET_PKG, PLUGIN_MARKET_PKG, "插件市场"),
             (PLUGIN_WHALE_SRC, PLUGIN_WHALE, "小鲸鱼余额挂件"),
             (PLUGIN_USAGE_PKG, PLUGIN_USAGE_PKG, "用量统计面板"),
+            (PLUGIN_NAVIGATOR_PKG, PLUGIN_NAVIGATOR, "对话导航条"),
         ];
         for (pkg, dep_name, label) in jobs {
             if self.plugin_installed(dep_name) {
@@ -1131,6 +1224,12 @@ impl DshManager {
                 name: "用量统计面板".into(),
                 installed: self.plugin_installed(PLUGIN_USAGE_PKG),
                 enabled: self.plugin_enabled(PLUGIN_USAGE),
+            },
+            PluginInfo {
+                id: PLUGIN_NAVIGATOR.into(),
+                name: "对话导航条".into(),
+                installed: self.plugin_installed(PLUGIN_NAVIGATOR_PKG),
+                enabled: self.plugin_enabled(PLUGIN_NAVIGATOR),
             },
         ]
     }

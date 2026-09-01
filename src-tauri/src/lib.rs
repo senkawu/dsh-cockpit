@@ -17,6 +17,7 @@
 
 mod commands;
 mod deep_link;
+mod host_ext;
 mod inject;
 mod preset;
 mod dsh;
@@ -134,6 +135,10 @@ fn create_main_window(app: &tauri::AppHandle) -> Result<WebviewWindow, Box<dyn s
             inject::run_injections(&win, &ev, safe);
         })
         .build()?;
+
+    // P4 2.10：窗口大小/位置记忆（保存由插件自动完成，这里恢复主窗口状态）
+    use tauri_plugin_window_state::{StateFlags, WindowExt};
+    let _ = win.restore_state(StateFlags::all());
 
     // 关闭 → 隐藏到托盘（不退出）
     {
@@ -301,13 +306,36 @@ async fn check_and_prompt(app: &tauri::AppHandle, manager: &DshManager, manual: 
     }
     info!("检测到 dsh 新版本: {latest}");
     manager.emit_status(app, "update-available", &format!("发现 dsh 新版本 {latest}"), Some(&latest));
+    // P4 2.5.3-3：自动检查发现更新 → 系统通知提醒（手动检查走弹窗，不重复通知）
+    if !manual {
+        host_ext::notify_update_available(app, &latest);
+    }
     // 三按钮：立即更新 / 跳过此版本 / 稍后（自动与手动检查共用）
+    // P4 2.6：命中兼容矩阵 → 标题加 ⚠️ 并在文案里附原因
     let app2 = app.clone();
     let manager2 = manager.clone();
     let current = manager.installed_version().unwrap_or_default();
+    let incompat = crate::dsh::incompatible_reason(&latest);
+    let title = match &incompat {
+        Some(_) => "⚠️ DSH 内核更新（兼容性警告）",
+        None => "DSH 内核更新",
+    };
+    let body = match &incompat {
+        Some(reason) => format!(
+            "检测到 DSH 内核新版本 {latest}（当前 {current}）。\n\n\
+             ⚠️ 此版本可能包含破坏性变更：{reason}\n\
+             建议先查看更新说明再决定是否升级。"
+        ),
+        None => format!("检测到 DSH 内核新版本 {latest}（当前 {current}）。"),
+    };
     app.dialog()
-        .message(format!("检测到 DSH 内核新版本 {latest}（当前 {current}）。"))
-        .title("DSH 内核更新")
+        .message(body)
+        .title(title)
+        .kind(if incompat.is_some() {
+            tauri_plugin_dialog::MessageDialogKind::Warning
+        } else {
+            tauri_plugin_dialog::MessageDialogKind::Info
+        })
         .buttons(MessageDialogButtons::YesNoCancelCustom(
             "立即更新".into(),
             "跳过此版本".into(),
@@ -662,15 +690,40 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // 原生菜单（关于 / 检查更新 / 重启 / 安全模式重启 / 日志 / 控制面板）
     build_app_menu(&handle)?;
 
-    // 托盘（显示窗口 / 控制面板 / 重启 dsh / 完全退出）
+    // 托盘（显示窗口 / 控制面板 / 重启 dsh / 安全模式重启 / 完全退出）
+    // P4 2.10：tooltip 动态显示 dsh 版本与端口（就绪后更新）
+    let tray_tooltip = format!(
+        "DSH-Cockpit{}",
+        manager
+            .installed_version()
+            .map(|v| format!(" · dsh {v}"))
+            .unwrap_or_default()
+    );
     let show_item = MenuItem::with_id(&handle, "show", "显示窗口", true, None::<&str>)?;
     let panel_item = MenuItem::with_id(&handle, "panel", "控制面板", true, None::<&str>)?;
     let restart_item = MenuItem::with_id(&handle, "restart", "重启 dsh 服务", true, None::<&str>)?;
+    let safe_restart_item = MenuItem::with_id(
+        &handle,
+        "safe-restart",
+        "以安全模式重启",
+        true,
+        None::<&str>,
+    )?;
     let quit_item = MenuItem::with_id(&handle, "quit", "完全退出", true, None::<&str>)?;
-    let menu = Menu::with_items(&handle, &[&show_item, &panel_item, &restart_item, &quit_item])?;
+    let menu = Menu::with_items(
+        &handle,
+        &[
+            &show_item,
+            &panel_item,
+            &restart_item,
+            &safe_restart_item,
+            &quit_item,
+        ],
+    )?;
 
     let _tray = TrayIconBuilder::with_id("main-tray")
         .icon(handle.default_window_icon().unwrap().clone())
+        .tooltip(tray_tooltip)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -686,6 +739,8 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                     }
                 });
             }
+            // P4 2.8：托盘直接「以安全模式重启」（带 --safe-mode 重启自身）
+            "safe-restart" => relaunch_with_flag(app, "--safe-mode"),
             "quit" => {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
@@ -717,6 +772,9 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     // 后台引导
     tauri::async_runtime::spawn(bootstrap(handle.clone()));
 
+    // P4 宿主扩展：全局快捷键（Cmd+Shift+P 打开控制面板）
+    host_ext::register_shortcuts(&handle);
+
     Ok(())
 }
 
@@ -726,6 +784,13 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(
             tauri_plugin_log::Builder::new()
@@ -774,6 +839,8 @@ pub fn run() {
             commands::sync_credentials_now,
             commands::export_backup,
             commands::set_home_mode,
+            commands::get_autostart,
+            commands::set_autostart,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

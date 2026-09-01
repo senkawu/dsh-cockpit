@@ -17,9 +17,25 @@ async function refresh() {
     $('nodeRuntime').textContent = s.nodeRuntime || '—（尚未解析）';
     $('auto-check').checked = s.autoCheckUpdate;
     $('app-version').textContent = 'v' + (s.appVersion || '');
-    // 安全模式徽章
+    // 开机自启状态（P4 2.10）
+    try {
+      $('autostart').checked = await invoke('get_autostart');
+    } catch (e) { /* 平台不支持时忽略 */ }
+    // 安全模式徽章（P4 2.8：显示已停用的内置插件清单）
     const banner = $('safe-banner');
-    if (s.safeMode) banner.hidden = false; else banner.hidden = true;
+    if (s.safeMode) {
+      banner.hidden = false;
+      try {
+        const plugins = await invoke('get_plugins');
+        const disabled = plugins
+          .filter((p) => p.installed)
+          .map((p) => p.name)
+          .join('、');
+        $('safe-plugins-list').textContent = disabled ? `（已停用：${disabled}）` : '（第三方插件均已停用）';
+      } catch (e) { /* 忽略 */ }
+    } else {
+      banner.hidden = true;
+    }
   } catch (e) {
     $('update-result').textContent = '读取状态失败: ' + e;
   }
@@ -133,6 +149,15 @@ $('btn-quit').addEventListener('click', () => invoke('quit_app'));
 $('btn-exit-safe').addEventListener('click', () => invoke('exit_safe_mode'));
 $('auto-check').addEventListener('change', (e) => {
   invoke('set_auto_check_update', { enabled: e.target.checked });
+});
+$('autostart').addEventListener('change', async (e) => {
+  try {
+    await invoke('set_autostart', { enabled: e.target.checked });
+    $('autostart-hint').textContent = e.target.checked ? '已开启开机自启' : '已关闭开机自启';
+  } catch (err) {
+    $('autostart-hint').textContent = '设置失败: ' + err;
+    e.target.checked = !e.target.checked; // 回滚
+  }
 });
 
 // 监听后端状态事件（安装/更新/崩溃），自动刷新面板

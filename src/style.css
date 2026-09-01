@@ -68,6 +68,7 @@ footer { text-align: center; }
   gap: 8px;
 }
 .safe-banner button.mini { padding: 3px 10px; font-size: 11px; white-space: nowrap; }
+.safe-banner .safe-plugins { font-size: 11px; opacity: .85; flex: 1 1 100%; }
 
 /* ---- 状态页（酷炫加载） ---- */
 .status-body {

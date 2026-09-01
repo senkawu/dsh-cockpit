@@ -80,12 +80,20 @@ const TRACE_ZH_LOCALIZE_JS: &str = r#"
 "#;
 
 /// 注入清单（版本化；新增脚本在此登记，白名单生效）
-pub const INJECTION_MANIFEST: &[Injection] = &[Injection {
-    id: "trace-zh",
-    version: 1,
-    at: PageLoadEvent::Finished, // 轨迹面板是动态渲染，Finished 后由 MutationObserver 接管
-    script: TRACE_ZH_LOCALIZE_JS,
-}];
+pub const INJECTION_MANIFEST: &[Injection] = &[
+    Injection {
+        id: "trace-zh",
+        version: 1,
+        at: PageLoadEvent::Finished, // 轨迹面板是动态渲染，Finished 后由 MutationObserver 接管
+        script: TRACE_ZH_LOCALIZE_JS,
+    },
+    Injection {
+        id: "dsh-cockpit-bridge",
+        version: 1,
+        at: PageLoadEvent::Finished,
+        script: crate::host_ext::DSH_COCKPIT_BRIDGE_JS,
+    },
+];
 
 /// 对一次页面加载执行清单注入。safe_mode 时整体关闭。
 pub fn run_injections(win: &WebviewWindow, event: &PageLoadEvent, safe_mode: bool) {
