@@ -1,9 +1,7 @@
-# 一站式构建：macOS(arm64/x64) / Windows(x64/arm64) / Debian(deb) / RedHat(rpm)
-# 用法：推送到 GitHub 后在 Actions 页面手动 Run workflow，或 push 自动触发；
-#      完成后在每次运行的 Artifacts 里下载安装包。
-# 外壳自更新：bundle.createUpdaterArtifacts=true 时各平台产出 .sig 签名文件，
-#      release job 生成 JSON 清单（{{target}}-{{arch}}-{{current_version}}.json）并
-#      与安装包一起挂到 GitHub Release，tauri-plugin-updater 据此完成外壳升级。
+# 构建并发布：macOS(arm64) / Windows(x64/arm64)
+# 触发：push 到 main/master 或手动 dispatch；成功构建后发布到 GitHub Releases。
+# 外壳自更新：bundle.createUpdaterArtifacts=true 产出 .sig 签名，
+#      release job 生成 {{target}}-{{arch}}.json 清单并挂到 Release。
 name: build
 
 on:
@@ -18,7 +16,6 @@ jobs:
   mac-arm64:
     name: macOS Apple Silicon (dmg)
     runs-on: macos-14 # arm64 runner
-    continue-on-error: true # macOS 运行器可能长时间排队，失败/排队不阻塞发布与其他平台
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -34,30 +31,6 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: macos-arm64
-          path: |
-            src-tauri/target/release/bundle/dmg/*.dmg
-            src-tauri/target/release/bundle/macos/*.tar.gz
-            src-tauri/target/release/bundle/macos/*.sig
-
-  mac-x64:
-    name: macOS Intel (dmg)
-    runs-on: macos-13 # x64 runner
-    continue-on-error: true # macOS 运行器可能长时间排队，失败/排队不阻塞发布与其他平台
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
-        with: { node-version: 24 }
-      - run: npm install
-      - run: npx tauri build --bundles app,dmg
-        env:
-          DSH_REGISTRY: "https://registry.npmmirror.com"
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: macos-x64
           path: |
             src-tauri/target/release/bundle/dmg/*.dmg
             src-tauri/target/release/bundle/macos/*.tar.gz
@@ -111,62 +84,13 @@ jobs:
             src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.exe
             src-tauri/target/aarch64-pc-windows-msvc/release/bundle/nsis/*.sig
 
-  linux-deb:
-    name: Debian/Ubuntu (deb)
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
-        with: { node-version: 24 }
-      - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libappindicator3-dev libsoup-3.0-dev libssl-dev
-      - run: npm install
-      - run: npx tauri build --bundles deb
-        env:
-          DSH_REGISTRY: "https://registry.npmmirror.com"
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-deb
-          path: |
-            src-tauri/target/release/bundle/deb/*.deb
-            src-tauri/target/release/bundle/deb/*.sig
-
-  linux-rpm:
-    name: RedHat/Fedora (rpm)
-    runs-on: ubuntu-22.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
-        with: { node-version: 24 }
-      - run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libappindicator3-dev libsoup-3.0-dev libssl-dev rpm
-      - run: npm install
-      - run: npx tauri build --bundles rpm
-        env:
-          DSH_REGISTRY: "https://registry.npmmirror.com"
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-rpm
-          path: |
-            src-tauri/target/release/bundle/rpm/*.rpm
-            src-tauri/target/release/bundle/rpm/*.sig
-
-  # 全部构建成功后：打标签并创建 GitHub Release，挂载安装包 + 生成 updater JSON 清单
+  # 三个平台全部构建成功后：打标签并创建 GitHub Release，挂载安装包 + updater 清单
   release:
     name: 📦 发布 GitHub Release
     runs-on: ubuntu-latest
-    # 显式声明写权限：push tag 与创建 Release 需要 contents:write
-    # （仓库设置里的 Actions 工作流权限也需为 read/write，两者缺一不可）
     permissions:
       contents: write
-    # 只依赖非 mac 核心任务（mac 排队/失败不阻塞发布）；产物按实际存在收集
-    needs: [win-x64, win-arm64, linux-deb, linux-rpm]
+    needs: [mac-arm64, win-x64, win-arm64]
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
@@ -185,39 +109,28 @@ jobs:
             echo "::notice::Release $VERSION 已存在，跳过创建"
             exit 0
           fi
-          # 收集实际构建成功的安装包（mac 未就绪时只发已有平台）；
-          # 含 updater 用的 .app.tar.gz（清单 URL 指向 release 上的该文件）
-          FILES=$(find artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.deb' -o -name '*.rpm' -o -name '*.app.tar.gz' -o -name '*.tar.gz' \))
+          # 收集安装包（含 updater 用的 .app.tar.gz，清单 URL 指向它）
+          FILES=$(find artifacts -type f \( -name '*.dmg' -o -name '*.exe' -o -name '*.app.tar.gz' -o -name '*.tar.gz' \))
           echo "待上传: $FILES"
-          # 生成 updater 清单（每个平台一个 JSON，命名与 tauri.conf 的 endpoint 模板一致：
-          # {{target}}-{{arch}}.json；固定名保证任意旧版本用户都能从 latest 拉到最新清单）。
+          # 生成 updater 清单（{{target}}-{{arch}}.json；架构以 artifact 目录名判定）
           python3 - <<'PYEOF'
           import json, os, glob, datetime
           artifacts_dir = "artifacts"
           version = "$SHORT"
           entries = {}  # target -> {url, signature}
-          # 收集所有 .sig（文件名 = 安装包名 + .sig）
           sigs = {}
           for p in glob.glob(artifacts_dir + "/**/*.sig", recursive=True):
               sigs[os.path.basename(p)[:-4]] = open(p).read().strip()
-          # 匹配安装包与其签名（按文件名对应关系；tauri 产物：<产品>_<ver>_<target>_<arch>.<ext>）
-          installer_exts = (".app.tar.gz", ".exe", ".deb", ".rpm")
-          files = []
-          for ext in installer_exts:
-              files += glob.glob(artifacts_dir + "/**/*" + ext, recursive=True)
-          # 目标 triple 推导：tauri 产物名不含完整 triple（如 DSH-Cockpit.app.tar.gz、
-          # dsh-cockpit_0.2.1_arm64-setup.exe），架构以 upload-artifact 的目录名判定
-          # （macos-arm64 / macos-x64 / windows-x64 / windows-arm64 / linux-deb / linux-rpm）。
           def guess_target(f):
               p = f.replace("\\", "/").lower()
               n = os.path.basename(f).lower()
               if "/macos-arm64/" in p: return "aarch64-apple-darwin"
-              if "/macos-x64/" in p: return "x86_64-apple-darwin"
               if "/windows-arm64/" in p or ("arm64" in n and n.endswith(".exe")): return "aarch64-pc-windows-msvc"
               if "/windows-x64/" in p: return "x86_64-pc-windows-msvc"
-              if "/linux-deb/" in p: return "x86_64-unknown-linux-gnu"
-              if "/linux-rpm/" in p: return "x86_64-unknown-linux-gnu"
               return None
+          files = []
+          for ext in (".app.tar.gz", ".exe"):
+              files += glob.glob(artifacts_dir + "/**/*" + ext, recursive=True)
           for f in files:
               name = os.path.basename(f)
               target = guess_target(f)
@@ -249,8 +162,6 @@ jobs:
           PYEOF
           JSON_FILES=$(find update-json -name '*.json' 2>/dev/null || true)
           echo "清单: $JSON_FILES"
-          # 打标签（若不存在则指向当前提交）并上传。
-          # 注意：--notes 与 --generate-notes 互斥，只用自动生成。
           git tag "$VERSION" || true
           git push origin "$VERSION" || true
           # shellcheck disable=SC2086
