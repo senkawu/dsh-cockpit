@@ -1,6 +1,6 @@
 {
   "name": "dsh-cockpit",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "deepseek harness 桌面客户端（Tauri 2 外壳 + dsh 内核解耦）",
   "scripts": {
