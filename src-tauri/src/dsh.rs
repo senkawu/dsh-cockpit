@@ -171,6 +171,44 @@ mod tests {
             Some("sk-old-1")
         );
     }
+
+    // ---------- 补丁层（插件开关）回归 ----------
+
+    #[test]
+    fn patch_disable_row_is_mapping_not_sequence() {
+        // 核心 bug：from_str("- id: X...") 会解析成 Sequence，写坏文件
+        let row = DshManager::patch_disable_row("dsh-whale-widget");
+        assert!(row.is_mapping(), "补丁行必须是 mapping，实际不是");
+        let m = row.as_mapping().unwrap();
+        assert_eq!(m.get(&serde_yaml::Value::String("id".into())).unwrap().as_str(), Some("dsh-whale-widget"));
+        assert_eq!(m.get(&serde_yaml::Value::String("disabled".into())).unwrap().as_bool(), Some(true));
+    }
+
+    #[test]
+    fn patch_text_valid_rejects_nested_sequence() {
+        // 坏文件 `- - id: X`（历史 bug 产物）必须被判为非法
+        assert!(!DshManager::patch_text_valid("- - id: dsh-whale-widget\n    disabled: true\n"));
+        // 合法文件
+        assert!(DshManager::patch_text_valid("- id: dsh-whale-widget\n  disabled: true\n"));
+        assert!(DshManager::patch_text_valid("[]\n"));
+    }
+
+    #[test]
+    fn heal_patch_rows_unwraps_nested_sequence() {
+        // 历史损坏：`- - id: X\n    disabled: true` 解析后顶层是 [Sequence([Mapping])]
+        let parsed: serde_yaml::Value =
+            serde_yaml::from_str("- - id: dsh-whale-widget\n    disabled: true\n").unwrap();
+        let seq = parsed.as_sequence().unwrap().clone();
+        let (healed, fixed) = DshManager::heal_patch_rows(seq);
+        assert!(fixed);
+        assert_eq!(healed.len(), 1);
+        assert!(healed[0].is_mapping());
+        let m = healed[0].as_mapping().unwrap();
+        assert_eq!(
+            m.get(&serde_yaml::Value::String("id".into())).unwrap().as_str(),
+            Some("dsh-whale-widget")
+        );
+    }
 }
 
 /// 内置插件：插件市场 / 小鲸鱼余额挂件 / 用量统计面板。
@@ -1044,6 +1082,103 @@ impl DshManager {
         self.profile_dir().join("cordis.patch.yml")
     }
 
+    /// 构造补丁行 mapping（`{id, disabled: true}`）。
+    /// 注意：绝不能 from_str("- id: X...")——会解析成嵌套 Sequence。
+    fn patch_disable_row(id: &str) -> serde_yaml::Value {
+        let mut m = serde_yaml::Mapping::new();
+        m.insert(
+            serde_yaml::Value::String("id".into()),
+            serde_yaml::Value::String(id.into()),
+        );
+        m.insert(
+            serde_yaml::Value::String("disabled".into()),
+            serde_yaml::Value::Bool(true),
+        );
+        serde_yaml::Value::Mapping(m)
+    }
+
+    /// 自愈展开：把顶层 Sequence 元素里的 Mapping 条目提出来（修复历史嵌套损坏）。
+    fn heal_patch_rows(seq: Vec<serde_yaml::Value>) -> (Vec<serde_yaml::Value>, bool) {
+        let mut healed: Vec<serde_yaml::Value> = Vec::new();
+        let mut fixed = false;
+        for row in seq {
+            match row {
+                serde_yaml::Value::Sequence(inner) => {
+                    for item in inner {
+                        if item.is_mapping() {
+                            healed.push(item);
+                            fixed = true;
+                        }
+                    }
+                }
+                other => healed.push(other),
+            }
+        }
+        (healed, fixed)
+    }
+
+    /// 补丁文件内容是否合法（列表且每个元素都是 mapping）
+    fn patch_text_valid(text: &str) -> bool {
+        serde_yaml::from_str::<serde_yaml::Value>(text)
+            .map(|v| {
+                v.is_sequence()
+                    && v.as_sequence()
+                        .map(|s| s.iter().all(|e| e.is_mapping()))
+                        .unwrap_or(true)
+            })
+            .unwrap_or(false)
+    }
+
+    /// 启动自愈：修复历史版本写坏的补丁层（顶层元素是嵌套 Sequence，
+    /// dsh 启动报 "overlay entry N must be a mapping"）。无损坏则不动。
+    /// 在 start / 设置开关前调用，保证坏文件也能自愈后正常启动。
+    pub fn heal_patch_layer(&self) -> Result<bool, String> {
+        use std::io::Write;
+        let path = self.patch_path();
+        if !path.is_file() {
+            return Ok(false);
+        }
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(r) => r,
+            Err(_) => return Ok(false),
+        };
+        let seq: Vec<serde_yaml::Value> = match serde_yaml::from_str(&raw) {
+            Ok(serde_yaml::Value::Sequence(s)) => s,
+            _ => return Ok(false), // 空/非列表不动（set_plugin_enabled 会另行处理）
+        };
+        // 是否含非 mapping 顶层元素（嵌套 Sequence 等）
+        let broken = seq.iter().any(|e| !e.is_mapping());
+        if !broken {
+            return Ok(false);
+        }
+        // 展开嵌套 Sequence 中的 Mapping 条目
+        let (healed, _fixed) = Self::heal_patch_rows(seq);
+        // 备份 + 写回 + 校验（仍须全 mapping）
+        let backup = format!("{}.bak", path.display());
+        std::fs::copy(&path, &backup).ok();
+        let new_text = if healed.is_empty() {
+            "[]\n".to_string()
+        } else {
+            let mut out = Vec::new();
+            serde_yaml::to_writer(&mut out, &healed)
+                .map_err(|e| format!("序列化补丁失败: {e}"))?;
+            let mut s = String::from_utf8_lossy(&out).into_owned();
+            if !s.ends_with('\n') {
+                s.push('\n');
+            }
+            s
+        };
+        if let Err(e) = std::fs::File::create(&path).and_then(|mut f| f.write_all(new_text.as_bytes())) {
+            return Err(format!("修复补丁层写入失败: {e}"));
+        }
+        if !Self::patch_text_valid(&new_text) {
+            std::fs::copy(&backup, &path).ok(); // 回滚
+            return Err("修复补丁层后校验失败，已回滚".into());
+        }
+        log::warn!("补丁层自愈完成（嵌套列表已展开）: {}", path.display());
+        Ok(true)
+    }
+
     /// 插件是否已安装（profile package.json dependencies 里有对应包）
     fn plugin_installed(&self, pkg: &str) -> bool {
         let raw = match std::fs::read_to_string(self.profile_dir().join("package.json")) {
@@ -1081,7 +1216,8 @@ impl DshManager {
     /// profile 文件 watcher（HMR）约 1 秒内重组合 loader，无需重启。
     ///
     /// 安全化（参考 dataelement/dsh-desktop 的 patch-layer 原则）：
-    /// 写入前备份，写入后用 serde_yaml 校验仍是合法列表，非法则回滚，绝不写坏文件。
+    /// 写入前备份，写入后用 serde_yaml 校验仍是合法列表且每个元素都是 mapping，
+    /// 非法则回滚，绝不写坏文件。
     pub fn set_plugin_enabled(&self, id: &str, enabled: bool) -> Result<(), String> {
         use std::io::Write;
         let path = self.patch_path();
@@ -1099,17 +1235,22 @@ impl DshManager {
             }
         };
 
+        // 自愈：历史版本曾把 `- id: X` 解析成嵌套 Sequence 写坏文件
+        // （`- - id: X`），dsh 启动报 "overlay entry N must be a mapping"。
+        let (healed_rows, fixed) = Self::heal_patch_rows(rows);
+        if fixed {
+            log::warn!("检测到历史损坏的补丁层（嵌套列表），已自动修复: {}", path.display());
+        }
+        rows = healed_rows;
+
         // 去掉目标 id 的既有行（`- id: X` 的 map）
         rows.retain(|row| {
             !(row.get("id").and_then(|v| v.as_str()) == Some(id))
         });
 
-        // 需要禁用 → 追加 `- id: X` + `disabled: true`
+        // 需要禁用 → 追加 `- id: X` + `disabled: true`（直接构造 Mapping）
         if !enabled {
-            rows.push(serde_yaml::from_str::<serde_yaml::Value>(&format!(
-                "- id: {id}\n  disabled: true\n"
-            ))
-            .map_err(|e| format!("构造补丁行失败: {e}"))?);
+            rows.push(Self::patch_disable_row(id));
         }
 
         // 备份 + 写新内容 + 校验回滚
@@ -1129,13 +1270,11 @@ impl DshManager {
         if let Err(e) = std::fs::File::create(&path).and_then(|mut f| f.write_all(new_text.as_bytes())) {
             return Err(format!("写入补丁层失败: {e}"));
         }
-        // 写回后自检：必须仍是合法列表
-        if serde_yaml::from_str::<serde_yaml::Value>(&new_text)
-            .map(|v| !v.is_sequence())
-            .unwrap_or(true)
-        {
+        // 写回后自检：必须是合法列表，且每个元素都是 mapping
+        // （否则 dsh 启动报 "overlay entry N must be a mapping"）
+        if !Self::patch_text_valid(&new_text) {
             std::fs::copy(&backup, &path).ok(); // 回滚
-            return Err("补丁写入后校验失败，已回滚".into());
+            return Err("补丁写入后校验失败（含非 mapping 元素），已回滚".into());
         }
         log::info!("插件开关: {id} → {}", if enabled { "启用" } else { "禁用" });
         Ok(())

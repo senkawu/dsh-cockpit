@@ -553,7 +553,10 @@ async fn bootstrap(app: tauri::AppHandle) {
         }
     }
 
-    // 3) 启动 dsh web 服务并加载 UI
+    // 3) 启动 dsh web 服务并加载 UI（先自愈历史写坏的补丁层，避免启动被拒）
+    if let Err(e) = manager.heal_patch_layer() {
+        warn!("补丁层自愈失败（不阻塞启动）: {e}");
+    }
     if let Err(e) = manager.start(&app).await {
         manager.emit_status(&app, "error", &format!("dsh 服务启动失败：{e}"), None);
         return;
