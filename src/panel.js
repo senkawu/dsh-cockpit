@@ -141,3 +141,53 @@ listen('dsh-status', () => refreshPlugins());
 
 refresh();
 refreshPlugins();
+
+// ---------- Agent 预设 ----------
+async function refreshPresets() {
+  const list = document.getElementById('preset-list');
+  const hint = document.getElementById('preset-hint');
+  try {
+    const presets = await invoke('list_presets');
+    list.innerHTML = '';
+    if (!presets.length) {
+      list.innerHTML = '<div class="row"><span class="dim">（暂无自定义预设，可在 dsh 界面创建后在此导出）</span></div>';
+      return;
+    }
+    for (const p of presets) {
+      const row = document.createElement('div');
+      row.className = 'row';
+      const label = document.createElement('span');
+      label.title = p.path;
+      label.textContent = p.name + (p.description ? ' — ' + p.description : '');
+      const btn = document.createElement('button');
+      btn.textContent = '导出';
+      btn.addEventListener('click', async () => {
+        hint.textContent = '正在打包导出…';
+        try {
+          const path = await invoke('export_preset', { id: p.id });
+          hint.textContent = '已导出: ' + path;
+        } catch (e) {
+          hint.textContent = '导出失败: ' + e;
+        }
+      });
+      row.append(label, btn);
+      list.appendChild(row);
+    }
+  } catch (e) {
+    hint.textContent = '读取预设失败: ' + e;
+  }
+}
+
+document.getElementById('btn-import-preset').addEventListener('click', async () => {
+  const hint = document.getElementById('preset-hint');
+  hint.textContent = '正在校验并导入…';
+  try {
+    const id = await invoke('import_preset');
+    hint.textContent = '已导入预设: ' + id;
+    refreshPresets();
+  } catch (e) {
+    hint.textContent = '导入失败: ' + e;
+  }
+});
+
+refreshPresets();

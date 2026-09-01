@@ -1,5 +1,6 @@
 //! 前端可调用的 IPC 命令（控制面板 UI ↔ Rust 后端）
 
+use std::path::PathBuf;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
@@ -261,4 +262,60 @@ pub fn open_log_dir(manager: State<'_, DshManager>) -> Result<(), String> {
 pub fn open_in_finder(path: String) -> Result<(), String> {
     crate::tray::open_external(&path);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Agent 预设（.dshpreset）导入导出
+// ---------------------------------------------------------------------------
+
+/// 列出自定义预设
+#[tauri::command]
+pub fn list_presets(manager: State<'_, DshManager>) -> Vec<crate::preset::PresetInfo> {
+    crate::preset::list_presets(manager.inner())
+}
+
+/// 导出预设：原生保存对话框 → 打包 .dshpreset，返回导出路径
+#[tauri::command]
+pub async fn export_preset(
+    app: AppHandle,
+    manager: State<'_, DshManager>,
+    id: String,
+) -> Result<String, String> {
+    use tauri_plugin_dialog::{DialogExt, FilePath};
+    let m = manager.inner().clone();
+    let (tx, rx) = tokio::sync::oneshot::channel::<Option<PathBuf>>();
+    app.dialog()
+        .file()
+        .set_file_name(format!("{id}.dshpreset"))
+        .add_filter("DSH 预设", &["dshpreset"])
+        .save_file(move |path| {
+            let _ = tx.send(match path {
+                Some(FilePath::Path(p)) => Some(p.into()),
+                _ => None,
+            });
+        });
+    let dest = rx.await.ok().flatten().ok_or("已取消导出")?;
+    crate::preset::export_preset(&crate::preset::presets_root(&m), &id, &dest)
+}
+
+/// 导入预设：原生选择对话框 → 校验并安装，返回新预设 id
+#[tauri::command]
+pub async fn import_preset(
+    app: AppHandle,
+    manager: State<'_, DshManager>,
+) -> Result<String, String> {
+    use tauri_plugin_dialog::{DialogExt, FilePath};
+    let m = manager.inner().clone();
+    let (tx, rx) = tokio::sync::oneshot::channel::<Option<PathBuf>>();
+    app.dialog()
+        .file()
+        .add_filter("DSH 预设", &["dshpreset"])
+        .pick_file(move |path| {
+            let _ = tx.send(match path {
+                Some(FilePath::Path(p)) => Some(p.into()),
+                _ => None,
+            });
+        });
+    let src = rx.await.ok().flatten().ok_or("已取消导入")?;
+    crate::preset::import_preset(&crate::preset::presets_root(&m), &src)
 }

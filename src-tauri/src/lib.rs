@@ -16,6 +16,7 @@
 //!   - 插件补丁层写入安全化（备份 + 校验回滚）
 
 mod commands;
+mod preset;
 mod dsh;
 mod npm;
 mod process_mgr;
@@ -623,6 +624,9 @@ pub fn run() {
             commands::open_log_viewer,
             commands::open_log_dir,
             commands::open_in_finder,
+            commands::list_presets,
+            commands::export_preset,
+            commands::import_preset,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
