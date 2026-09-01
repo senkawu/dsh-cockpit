@@ -181,8 +181,6 @@ pub const PLUGIN_WHALE: &str = "dsh-whale-widget"; // bundle 行 id == npm 包�
 pub const PLUGIN_WHALE_SRC: &str = "dsh-whale-widget"; // npm 包名（0.2.10 起已发布到 npm）
 pub const PLUGIN_USAGE: &str = "usage-stats"; // bundle 行 id
 pub const PLUGIN_USAGE_PKG: &str = "dsh-usage-statistics-panel"; // npm 包名
-pub const PLUGIN_NAVIGATOR: &str = "dsh-conversation-navigator"; // bundle 行 id == npm 包名
-pub const PLUGIN_NAVIGATOR_PKG: &str = "dsh-conversation-navigator"; // npm 包名
 
 /// npm 12 的 allowScripts 白名单：dsh 依赖树里需要跑安装脚本的原生包。
 /// 裸包名 = 按名字允许任意版本（防 npm 12 默认拦截导致 koffi.node 缺失）。
@@ -1257,15 +1255,15 @@ impl DshManager {
         }
     }
 
-    /// 安装内置插件（插件市场 + 小鲸鱼挂件 + 用量统计面板 + 导航条）。
+    /// 安装内置插件（插件市场 + 小鲸鱼挂件 + 用量统计面板）。
     /// 全部走 npm registry（默认 npmmirror，国内无需访问 GitHub）；幂等：已装则跳过。
     /// 失败不阻塞（插件是可选增强，dsh 仍可正常启动）。
+    /// 注：对话导航条已改由壳层注入（inject.rs navigator-rail），不再作为 npm 插件安装。
     pub async fn install_plugins(&self, app: &AppHandle) {
         let jobs: &[(&str, &str, &str)] = &[
             (PLUGIN_MARKET_PKG, PLUGIN_MARKET_PKG, "插件市场"),
             (PLUGIN_WHALE_SRC, PLUGIN_WHALE, "小鲸鱼余额挂件"),
             (PLUGIN_USAGE_PKG, PLUGIN_USAGE_PKG, "用量统计面板"),
-            (PLUGIN_NAVIGATOR_PKG, PLUGIN_NAVIGATOR, "对话导航条"),
         ];
         for (pkg, dep_name, label) in jobs {
             if self.plugin_installed(dep_name) {
@@ -1300,12 +1298,6 @@ impl DshManager {
                 name: "用量统计面板".into(),
                 installed: self.plugin_installed(PLUGIN_USAGE_PKG),
                 enabled: self.plugin_enabled(PLUGIN_USAGE),
-            },
-            PluginInfo {
-                id: PLUGIN_NAVIGATOR.into(),
-                name: "对话导航条".into(),
-                installed: self.plugin_installed(PLUGIN_NAVIGATOR_PKG),
-                enabled: self.plugin_enabled(PLUGIN_NAVIGATOR),
             },
         ]
     }

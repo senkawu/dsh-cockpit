@@ -3,7 +3,7 @@
 //! - 全局快捷键 Cmd+Shift+P 打开控制面板
 //! - IPC 桥 `window.__dshCockpit`（白名单命令，Rust 侧守卫）
 
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::AppHandle;
 
 // ---------------------------------------------------------------------------
 // 系统通知（tauri-plugin-notification）

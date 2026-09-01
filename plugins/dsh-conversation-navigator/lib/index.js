@@ -7,6 +7,11 @@
 // 实现方式：宿主 webServer 注册静态脚本 + tapIndex 注入 <script>，
 // 刻度条纯前端实现（不依赖壳层，随 dsh 插件体系安装/热开关/卸载）。
 
+// 注意：选择器基于 dsh web 前端（dsh-client-ui-conversation）实测 DOM：
+//   - 消息单元: [class*="flowItem"]（如 Md3f7G_flowItem）
+//   - 用户消息: 单元内存在 [class*="userStack"]（如 gdEzaW_userStack）
+//   - 滚动容器: 消息流外层可滚动祖先（动态探测）
+
 const name = 'dsh-conversation-navigator'
 
 // 纯宿主插件：需要 webServer 服务注入（注册脚本路由 + tapIndex 注入）。
@@ -22,26 +27,12 @@ const NAVIGATOR_JS = `
   var THRESHOLD = 15; // 消息数低于此阈值自动隐藏
 
   // ---- 工具 ----
-  function byAll(selectors) {
-    for (var i = 0; i < selectors.length; i++) {
-      var nodes = document.querySelectorAll(selectors[i]);
-      if (nodes && nodes.length) return nodes;
-    }
-    return [];
-  }
-  function byOne(selectors) {
-    for (var i = 0; i < selectors.length; i++) {
-      var el = document.querySelector(selectors[i]);
-      if (el) return el;
-    }
-    return null;
-  }
-  function isUserMessage(el) {
-    // 命中任意用户消息特征（角色标记/对齐方式）即视为用户消息
+  function isUserFlowItem(el) {
     if (!el || el.nodeType !== 1) return false;
-    if (el.closest && el.closest('[data-role="user"], [data-author="user"], [data-actor="user"]')) return true;
-    var cls = (el.className && String(el.className)) || '';
-    if (cls.indexOf('user') !== -1 || cls.indexOf('User') !== -1) return true;
+    // 消息单元内存在用户消息栈即视为用户轮次
+    if (el.querySelector && el.querySelector('[class*="userStack" i]')) return true;
+    var cls = (typeof el.className === 'string' ? el.className : '') || '';
+    if (cls.indexOf('userStack') !== -1 || cls.indexOf('UserStack') !== -1) return true;
     return false;
   }
   function previewText(el) {
@@ -70,73 +61,94 @@ const NAVIGATOR_JS = `
   var tip = null;
   var ticks = new Map(); // 消息元素 -> 刻度元素
 
-  function containerEl() {
-    return byOne([
-      '[data-testid="conversation-list"]',
-      '[data-testid="message-list"]',
-      '.chat-messages',
-      '.message-list',
-      '.conversation-list',
-      'main',
-    ]);
+  function flowItems() {
+    return document.querySelectorAll('[class*="flowItem"]');
   }
-  function messageEls() {
-    return byAll([
-      '[data-testid="message"]',
-      '[data-testid="chat-message"]',
-      '.chat-message',
-      '.message',
-      '[class*="message"]',
-    ]);
+  function scrollContainer() {
+    // 消息流外层可滚动容器（动态探测：从消息单元向上找可滚动祖先）
+    var first = flowItems()[0];
+    if (!first) return null;
+    var p = first.parentElement;
+    var depth = 0;
+    while (p && depth < 8) {
+      if (p.scrollHeight > p.clientHeight + 50) return p;
+      p = p.parentElement;
+      depth++;
+    }
+    return null;
   }
 
   function rebuild() {
     if (!rail) return;
-    var container = containerEl();
-    if (!container) return;
-    var msgs = messageEls();
-    if (!msgs || msgs.length < THRESHOLD) {
+    var items = flowItems();
+    var userItems = Array.prototype.filter.call(items, isUserFlowItem);
+    // 用户消息数 < 阈值 → 隐藏
+    if (!userItems.length || userItems.length < THRESHOLD) {
       rail.style.display = 'none';
       return;
     }
-    rail.style.display = '';
+    rail.style.display = 'flex';
     // 清空旧刻度
     ticks.forEach(function (t) { if (t.parentNode) t.parentNode.removeChild(t); });
     ticks.clear();
-    var userMsgs = Array.prototype.filter.call(msgs, isUserMessage);
-    if (!userMsgs.length) return;
-    var step = Math.max(1, Math.floor((container.scrollHeight - container.clientHeight) / userMsgs.length));
-    userMsgs.forEach(function (msg) {
-      var tick = document.createElement('div');
-      tick.className = 'dsh-nav-tick';
-      var summary = previewText(msg);
-      tick.title = summary;
-      tick.addEventListener('mouseenter', function (ev) {
-        if (!tip) return;
-        tip.textContent = summary || '（空消息）';
-        tip.style.display = 'block';
-        var r = ev.clientX, b = ev.clientY;
-        tip.style.left = Math.min(r + 14, window.innerWidth - 300) + 'px';
-        tip.style.top = Math.min(b - 8, window.innerHeight - 40) + 'px';
+    var container = scrollContainer();
+    if (!container) {
+      // 无滚动容器：仍渲染刻度，点击直接 scrollIntoView
+      userItems.forEach(function (msg) {
+        var tick = makeTick(msg);
+        rail.appendChild(tick);
+        ticks.set(msg, tick);
       });
-      tick.addEventListener('mouseleave', function () {
-        if (tip) tip.style.display = 'none';
-      });
-      tick.addEventListener('click', function () {
-        msg.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        ticks.forEach(function (t) { t.classList.remove('dsh-nav-active'); });
-        tick.classList.add('dsh-nav-active');
-      });
+      return;
+    }
+    // 有滚动容器：刻度按消息在流中的相对位置定位（比例映射）
+    var total = container.scrollHeight - container.clientHeight || 1;
+    userItems.forEach(function (msg) {
+      var tick = makeTick(msg);
+      // 用 offsetTop 相对滚动容器比例定位（无容器时忽略）
+      var top = 0;
+      var el = msg;
+      while (el && el !== container && el !== document.body) {
+        top += el.offsetTop || 0;
+        el = el.offsetParent;
+      }
+      var ratio = Math.min(1, Math.max(0, top / container.scrollHeight));
+      tick.style.marginTop = (ratio * 100) + '%';
+      tick.style.marginBottom = '0';
       rail.appendChild(tick);
       ticks.set(msg, tick);
     });
-    void step; // 位置按 scrollIntoView 定位，step 仅为将来「按比例定位」预留
+  }
+
+  function makeTick(msg) {
+    var tick = document.createElement('div');
+    tick.className = 'dsh-nav-tick';
+    var summary = previewText(msg);
+    tick.title = summary;
+    tick.addEventListener('mouseenter', function (ev) {
+      if (!tip) return;
+      tip.textContent = summary || '（空消息）';
+      tip.style.display = 'block';
+      var r = ev.clientX, b = ev.clientY;
+      tip.style.left = Math.min(r + 14, window.innerWidth - 300) + 'px';
+      tip.style.top = Math.min(b - 8, window.innerHeight - 40) + 'px';
+    });
+    tick.addEventListener('mouseleave', function () {
+      if (tip) tip.style.display = 'none';
+    });
+    tick.addEventListener('click', function () {
+      msg.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      ticks.forEach(function (t) { t.classList.remove('dsh-nav-active'); });
+      tick.classList.add('dsh-nav-active');
+    });
+    return tick;
   }
 
   function ensureRail() {
     if (rail) return;
     rail = document.createElement('div');
     rail.className = 'dsh-nav-rail';
+    rail.style.display = 'none'; // 初始隐藏，rebuild 判定
     document.body.appendChild(rail);
     tip = document.createElement('div');
     tip.className = 'dsh-nav-tip';
@@ -152,22 +164,23 @@ const NAVIGATOR_JS = `
       clearTimeout(window.__dshNavTimer);
       window.__dshNavTimer = setTimeout(rebuild, 300);
     });
-    var root = containerEl() || document.body;
-    mo.observe(root, { childList: true, subtree: true });
-    // 滚动时更新活跃刻度
-    window.addEventListener('scroll', function () {
+    mo.observe(document.body, { childList: true, subtree: true });
+    // 滚动时更新活跃刻度（按可见性：离视口中心最近的用户消息）
+    var scrollTick = function () {
       if (!ticks.size) return;
-      var container = containerEl();
-      if (!container) return;
-      var mid = container.scrollTop + container.clientHeight / 2;
       var best = null, bestDist = Infinity;
+      var mid = window.innerHeight / 2;
       ticks.forEach(function (tick, msg) {
-        var d = Math.abs((msg.offsetTop || 0) - mid);
+        var r = msg.getBoundingClientRect();
+        if (r.height === 0) return;
+        var center = r.top + r.height / 2;
+        var d = Math.abs(center - mid);
         if (d < bestDist) { bestDist = d; best = tick; }
       });
       ticks.forEach(function (t) { t.classList.remove('dsh-nav-active'); });
       if (best) best.classList.add('dsh-nav-active');
-    }, { passive: true });
+    };
+    window.addEventListener('scroll', scrollTick, { passive: true });
     window.__dshNavigatorState = 'active';
   }
 
