@@ -229,6 +229,12 @@ pub fn collect_diagnostics(manager: State<'_, DshManager>, app: AppHandle) -> Re
         m.active_port.load(std::sync::atomic::Ordering::Relaxed).max(m.port)
     ));
     info.push_str(&format!("registry: {}\n", m.registry));
+    info.push_str(&format!(
+        "node_runtime: {}\n",
+        crate::process_mgr::runtime_node_cached()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "未解析（尚未启动或解析失败）".into())
+    ));
     info.push_str(&format!("env_dir: {}\n", m.env_dir.display()));
     info.push_str(&format!("home_dir: {}\n", m.active_home().display()));
     info.push_str(&format!("log_dir: {}\n", m.log_dir.display()));

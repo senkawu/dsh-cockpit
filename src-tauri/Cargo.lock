@@ -880,12 +880,16 @@ dependencies = [
 name = "dsh-cockpit"
 version = "0.2.1"
 dependencies = [
+ "flate2",
+ "hex",
  "log",
  "regex",
  "semver",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
+ "tar",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",

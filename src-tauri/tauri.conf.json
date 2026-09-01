@@ -17,9 +17,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "externalBin": ["binaries/node"],
     "resources": [
-      "npm",
       "pnpm"
     ],
     "icon": [

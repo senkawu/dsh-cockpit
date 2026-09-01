@@ -14,6 +14,7 @@ async function refresh() {
     $('envDir').textContent = s.envDir;
     $('homeDir').textContent = s.homeDir;
     $('logDir').textContent = s.logDir;
+    $('nodeRuntime').textContent = s.nodeRuntime || '—（尚未解析）';
     $('auto-check').checked = s.autoCheckUpdate;
     $('app-version').textContent = 'v' + (s.appVersion || '');
     // 安全模式徽章

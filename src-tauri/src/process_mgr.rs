@@ -2,12 +2,12 @@
 //! 端口探测、优雅停止（先 SIGTERM 再兜底强杀，且只动自己管理的进程）。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use log::warn;
 use tauri::async_runtime::Receiver;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 
@@ -17,6 +17,322 @@ pub struct DshProcess {
     pub pid: u32,
     pub managed: bool, // true=本程序 spawn；false=附加到外部已有实例（不做管理）
     pub port: u16,
+}
+
+/// Node 运行时版本与镜像（P3 按需下载；镜像默认 npmmirror，可用 DSH_NODE_MIRROR 覆盖）
+pub const NODE_VERSION: &str = "v26.5.0";
+pub const NODE_MIRROR_BASE: &str = "https://cdn.npmmirror.com/binaries/node";
+pub const NODE_OFFICIAL_BASE: &str = "https://nodejs.org/dist";
+/// 系统 Node 最低可接受主版本（低于则用内置/下载运行时）
+pub const NODE_MIN_SYSTEM_MAJOR: u32 = 24;
+
+/// 运行时 Node 解析结果缓存（进程生命周期内只解析一次）
+static RUNTIME_NODE: std::sync::OnceLock<Result<PathBuf, String>> = std::sync::OnceLock::new();
+
+/// 目标平台发行包目录名（Node 官方命名：darwin-arm64 / win-x64 / linux-x64 …）。
+/// 注意：Rust 的 ARCH 是 x86_64/aarch64，必须映射成 Node 的 x64/arm64，
+/// 否则下载 URL 404（此前误用 darwin-aarch64，CDN 永远返回 404）。
+fn dist_platform_arch() -> (String, String) {
+    let platform = std::env::var("DSH_TARGET_PLATFORM").unwrap_or_else(|_| {
+        match std::env::consts::OS {
+            "macos" => "darwin".to_string(),
+            "windows" => "win".to_string(),
+            other => other.to_string(),
+        }
+    });
+    let arch = std::env::var("DSH_TARGET_ARCH").unwrap_or_else(|_| {
+        match std::env::consts::ARCH {
+            "x86_64" => "x64".to_string(),
+            "aarch64" => "arm64".to_string(),
+            other => other.to_string(),
+        }
+    });
+    (platform, arch)
+}
+
+/// 发行包文件名与解压目录名
+fn dist_archive_names() -> (String, String) {
+    let (platform, arch) = dist_platform_arch();
+    let dir = format!("node-{NODE_VERSION}-{platform}-{arch}");
+    let file = if platform == "win" {
+        format!("{dir}.zip")
+    } else {
+        format!("{dir}.tar.gz")
+    };
+    (file, dir)
+}
+
+/// 已解析的运行时 node 路径（若已解析）
+pub fn runtime_node_cached() -> Option<PathBuf> {
+    RUNTIME_NODE.get().and_then(|r| r.as_ref().ok().cloned())
+}
+
+/// 校验并解析运行时 node：
+///   1) DSH_USE_SYSTEM_NODE=1 → 强制系统 node（<24 报错）
+///   2) 系统 node ≥24 → 直接用（系统优先，设计 2.4-B）
+///   3) <app_data>/node-runtime 已有缓存 → 复用
+///   4) 否则从镜像下载（sha256 校验 + 进度事件），失败回退官方源
+pub async fn ensure_runtime_node(
+    app: &tauri::AppHandle,
+    on_progress: &(dyn Fn(String) + Send + Sync),
+) -> Result<PathBuf, String> {
+    if let Some(cached) = RUNTIME_NODE.get() {
+        return cached.clone();
+    }
+
+    let node = resolve_runtime_node(app, on_progress).await;
+    let _ = RUNTIME_NODE.set(node.clone());
+    node
+}
+
+async fn resolve_runtime_node(
+    app: &tauri::AppHandle,
+    on_progress: &(dyn Fn(String) + Send + Sync),
+) -> Result<PathBuf, String> {
+    let force_system = std::env::var("DSH_USE_SYSTEM_NODE").as_deref() == Ok("1");
+    let force_download = std::env::var("DSH_FORCE_NODE_DOWNLOAD").as_deref() == Ok("1");
+
+    // 1) 系统 node ≥24 优先（可 DSH_FORCE_NODE_DOWNLOAD=1 强制走下载，用于调试/兜底）
+    if !force_download {
+        if let Some(sys) = find_system_node() {
+            if system_node_major(&sys) >= NODE_MIN_SYSTEM_MAJOR {
+                log::info!("使用系统 Node（>=24）：{}", sys.display());
+                return Ok(sys);
+            }
+            if force_system {
+                return Err(format!(
+                    "DSH_USE_SYSTEM_NODE=1 但系统 node 版本过低（{}）",
+                    sys.display()
+                ));
+            }
+        }
+    }
+
+    // 2) 已有缓存
+    let runtime_dir = app.path().app_data_dir().map_err(|e| e.to_string())?.join("node-runtime");
+    let (file, dir) = dist_archive_names();
+    let cached_node = runtime_dir.join(&dir).join(if cfg!(windows) { "node.exe" } else { "bin/node" });
+    if cached_node.is_file() {
+        log::info!("使用缓存的 Node 运行时：{}", cached_node.display());
+        return Ok(cached_node);
+    }
+
+    // 3) 下载（镜像优先，失败回退官方源）——下载/校验/解压都是阻塞 IO，放进 spawn_blocking
+    std::fs::create_dir_all(&runtime_dir).map_err(|e| e.to_string())?;
+    let archive_path = runtime_dir.join(&file);
+    let task_runtime_dir = runtime_dir.clone();
+    let task_archive = archive_path.clone();
+    let task_cached = cached_node.clone();
+    let task_file = file.clone();
+    let app_clone = app.clone();
+    let task_progress = move |line: String| {
+        let _ = app_clone.emit("dsh-update-progress", line);
+    };
+    let dl = tauri::async_runtime::spawn_blocking(move || {
+        let mut last_err = String::new();
+        // 整体重试：镜像/官方都可能间歇 404（CDN 边缘节点同步延迟）或慢速超时，
+        // 最多 5 轮、轮间退避 3s（刚发布的版本在部分边缘节点会短暂 404）
+        for round in 1..=5 {
+            if round > 1 {
+                std::thread::sleep(std::time::Duration::from_secs(3));
+                task_progress(format!("下载重试（第 {round}/5 轮）…"));
+            }
+            for base in [NODE_MIRROR_BASE, NODE_OFFICIAL_BASE] {
+                let url = format!("{base}/{NODE_VERSION}/{task_file}");
+                match download_node_archive(&url, &task_archive, &task_progress) {
+                    Ok(()) => break,
+                    Err(e) => {
+                        last_err = format!("{base}: {e}");
+                        log::warn!("Node 下载失败（{}），尝试下一镜像", last_err);
+                    }
+                }
+            }
+            if task_archive.is_file() {
+                break;
+            }
+        }
+        if !task_archive.is_file() {
+            return Err(format!("Node 运行时下载失败：{last_err}"));
+        }
+        task_progress("Node 下载完成，解压中…".into());
+        extract_archive(&task_archive, &task_runtime_dir).map_err(|e| e.to_string())?;
+        let _ = std::fs::remove_file(&task_archive);
+        if !task_cached.is_file() {
+            return Err(format!("解压后未找到 node 可执行文件：{}", task_cached.display()));
+        }
+        Ok::<(), String>(())
+    });
+    dl.await.map_err(|e| format!("Node 下载任务失败: {e}"))??;
+    on_progress(format!("Node 运行时就绪：{NODE_VERSION}"));
+    log::info!("Node 运行时就绪：{}", cached_node.display());
+    Ok(cached_node)
+}
+
+/// 查找系统 node（PATH + 常见目录）
+fn find_system_node() -> Option<PathBuf> {
+    let names: &[&str] = if cfg!(windows) { &["node.exe", "node"] } else { &["node"] };
+    for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
+        for name in names {
+            let p = std::path::Path::new(dir).join(name);
+            if p.is_file() {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// 系统 node 主版本
+fn system_node_major(node: &Path) -> u32 {
+    std::process::Command::new(node)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|v| {
+            v.trim_start_matches('v')
+                .split('.')
+                .next()
+                .and_then(|s| s.parse::<u32>().ok())
+        })
+        .unwrap_or(0)
+}
+
+/// 下载 Node 发行包（阻塞调用方线程；curl 断点续传 + sha256 校验 + 进度事件）。
+/// 注意：调用方应处于 spawn_blocking 中。
+fn download_node_archive(
+    url: &str,
+    dest: &Path,
+    on_progress: &(dyn Fn(String) + Send + Sync),
+) -> Result<(), String> {
+    let (file, _) = dist_archive_names();
+    // 期望 sha256：从发行目录的 SHASUMS256.txt 取（镜像优先，官方源兜底）
+    let mut expected = None;
+    for base in [NODE_MIRROR_BASE, NODE_OFFICIAL_BASE] {
+        let checksum_url = format!("{base}/{NODE_VERSION}/SHASUMS256.txt");
+        if let Some(h) = fetch_expected_sha256(&checksum_url, &file) {
+            expected = Some(h);
+            break;
+        }
+    }
+
+    // 下载前清掉残留（上次失败可能留下 422 字节的错误页/不完整文件，
+    // 否则 `-C -` 会基于垃圾文件续传，sha256 永远校验不过）
+    let _ = std::fs::remove_file(dest);
+
+    on_progress(format!("下载 Node 运行时 {NODE_VERSION}（镜像）…"));
+    // --connect-timeout/--max-time 防止官方源在国内不可达时无限挂起；
+    // --fail 让 HTTP 4xx/5xx 以非零退出码结束。
+    // 注意：npmmirror CDN 实测对 `-C -`（断点续传）请求返回 404，
+    // 因此先尝试续传，失败则删掉残留、不带 -C - 全量重下一次。
+    let curl = |resume: bool, dest: &Path| {
+        let mut args: Vec<String> = vec![
+            "-sSL".into(),
+            "--fail".into(),
+            "--connect-timeout".into(),
+            "10".into(),
+            "--max-time".into(),
+            "900".into(),
+        ];
+        if resume {
+            args.push("-C".into());
+            args.push("-".into());
+        }
+        args.push("-o".into());
+        args.push(dest.to_string_lossy().into_owned());
+        args.push(url.to_string());
+        std::process::Command::new("curl")
+            .args(&args)
+            .output()
+            .map_err(|e| format!("curl 执行失败: {e}"))
+    };
+    let mut output = curl(true, dest)?;
+    if !output.status.success() {
+        log::warn!(
+            "Node 续传下载失败（code {:?}），全量重下: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+        let _ = std::fs::remove_file(dest);
+        output = curl(false, dest)?;
+    }
+    if !output.status.success() {
+        let _ = std::fs::remove_file(dest); // 失败不留残渣
+        return Err(format!(
+            "curl 退出码 {:?}: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    // sha256 校验
+    if let Some(want) = expected {
+        let got = sha256_file(dest)?;
+        if !got.eq_ignore_ascii_case(&want) {
+            let _ = std::fs::remove_file(dest);
+            return Err(format!("sha256 校验失败：期望 {want}，实际 {got}"));
+        }
+    } else {
+        log::warn!("未取得期望 sha256（两个源均失败），跳过校验");
+    }
+    on_progress(format!(
+        "已下载 {} 校验通过",
+        dest.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    Ok(())
+}
+
+/// 从 SHASUMS256.txt 取目标文件的期望哈希（同步；调用方应在 spawn_blocking 中）
+fn fetch_expected_sha256(checksum_url: &str, file: &str) -> Option<String> {
+    let out = std::process::Command::new("curl")
+        .args(["-sSL", "--max-time", "30", checksum_url])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines().find_map(|l| {
+        let mut parts = l.split_whitespace();
+        let hash = parts.next()?.to_string();
+        if parts.any(|f| f == file) {
+            Some(hash)
+        } else {
+            None
+        }
+    })
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = f.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// 解压 Node 发行包（zip 用 zip crate；tar.gz 用 tar+flate2）
+fn extract_archive(archive: &Path, dest: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    if archive.to_string_lossy().ends_with(".zip") {
+        let file = std::fs::File::open(archive).map_err(|e| e.to_string())?;
+        let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+        zip.extract(dest).map_err(|e| e.to_string())?;
+    } else {
+        let f = std::fs::File::open(archive).map_err(|e| e.to_string())?;
+        let gz = flate2::read::GzDecoder::new(f);
+        let mut tar = tar::Archive::new(gz);
+        tar.unpack(dest).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// 当前平台的 Rust target triple（与 tauri externalBin sidecar 命名一致）
@@ -35,33 +351,13 @@ pub fn target_triple() -> &'static str {
     }
 }
 
-/// sidecar node 可执行文件的绝对路径。
-/// 开发模式文件名为 `node-<triple>`；**打包后 tauri 会去掉 triple 后缀**（裸名 `node`），
-/// 两种都要兼容，否则首次安装 dsh 时 ensure_node_launcher 找不到文件而失败。
+/// 运行时 node 可执行文件路径（P3：系统优先/缓存/按需下载后解析）。
+/// 必须在调用过 ensure_runtime_node（或 spawn_node / build_script_command）之后使用。
 pub fn sidecar_node_path() -> Result<PathBuf, String> {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .ok_or("无法定位可执行目录")?;
-    let triple = target_triple();
-    let suffix = if cfg!(windows) { ".exe" } else { "" };
-    let candidates = [
-        exe_dir.join(format!("node-{triple}{suffix}")), // 开发/调试
-        exe_dir.join(format!("node{suffix}")),          // 打包后（tauri 剥离 triple）
-    ];
-    for c in &candidates {
-        if c.exists() {
-            return Ok(c.clone());
-        }
+    match runtime_node_cached() {
+        Some(p) => Ok(p),
+        None => Err("Node 运行时尚未解析（请先完成 ensure_runtime_node）".into()),
     }
-    Err(format!(
-        "sidecar node 不存在（已尝试: {}）",
-        candidates
-            .iter()
-            .map(|c| c.display().to_string())
-            .collect::<Vec<_>>()
-            .join(" / ")
-    ))
 }
 
 /// 在 <app_data>/bin 下创建名为 `node` 的启动器（unix 符号链接 / Windows .cmd），
@@ -123,21 +419,18 @@ pub fn build_child_env(
     Ok(envs)
 }
 
-/// 用 sidecar node 启动任意命令（dsh bin.js / npm / pnpm 等）
+/// 用运行时 node 启动任意命令（dsh bin.js / npm / pnpm 等）。
+/// P3：先确保运行时 node（系统优先 / 缓存 / 按需下载），再直接 spawn 该路径。
 pub async fn spawn_node(
     app: &AppHandle,
     args: &[String],
     envs: &HashMap<String, String>,
 ) -> Result<(Receiver<CommandEvent>, CommandChild), String> {
+    let node = ensure_runtime_node(app, &|_| {}).await?;
     let envs = build_child_env(app, envs)?;
     let mut all = vec!["--no-warnings".to_string()];
     all.extend_from_slice(args);
-    let cmd = app
-        .shell()
-        .sidecar("node")
-        .map_err(|e| format!("解析 sidecar node 失败: {e}"))?
-        .args(all)
-        .envs(envs);
+    let cmd = app.shell().command(&node).args(all).envs(envs);
     let (rx, child) = cmd.spawn().map_err(|e| format!("spawn node 失败: {e}"))?;
     Ok((rx, child))
 }

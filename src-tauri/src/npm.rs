@@ -1,9 +1,9 @@
-//! npm / pnpm 执行封装：全部经 sidecar node 运行打包在资源目录里的 JS CLI。
-//! 用户机器上不需要预装 node/npm，且与系统环境完全隔离。
+//! pnpm 执行封装：全部经运行时 node（系统优先 / 缓存 / 按需下载）运行资源目录里的纯 JS CLI。
+//! 用户机器上不需要预装 node/npm，且与系统环境完全隔离（P3 不再打包 node sidecar）。
 //!
 //! - dsh 的隔离环境安装/更新用 **pnpm**（并行下载 + 内容寻址 store，比 npm 快数倍；
 //!   且 dsh 官方插件机制本身就用 pnpm）。
-//! - 版本查询（npm view）等短命令仍用 npm-cli.js。
+//! - 版本查询（pnpm view）等短命令同样走 pnpm CLI。
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -12,10 +12,7 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_shell::process::CommandEvent;
 use tauri_plugin_shell::ShellExt;
 
-/// 资源目录里的 npm-cli.js（scripts/fetch-node.mjs 构建时从 node 发行包拆出）
-pub fn npm_cli_path(app: &AppHandle) -> Result<PathBuf, String> {
-    resource_path(app, &["npm", "node_modules", "npm", "bin", "npm-cli.js"])
-}
+use crate::process_mgr::ensure_runtime_node;
 
 /// 资源目录里的 pnpm.cjs（scripts/fetch-node.mjs 从 npm 镜像拉取，纯 JS）
 pub fn pnpm_cli_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -32,34 +29,35 @@ fn resource_path(app: &AppHandle, parts: &[&str]) -> Result<PathBuf, String> {
 }
 
 /// 构造 `node <script> <args...>` 命令（shell 插件的 Command 是 builder，方法消费 self）。
+/// P3：node 用运行时 node（ensure_runtime_node），不再依赖 sidecar。
 /// 环境统一经 process_mgr::build_child_env 注入 PATH（node 启动器），
 /// 保证 pnpm 的 postinstall 生命周期脚本能找到 node。
-fn build_script_command(
+async fn build_script_command(
     app: &AppHandle,
     script: &Path,
     args: &[String],
     envs: &HashMap<String, String>,
 ) -> Result<tauri_plugin_shell::process::Command, String> {
+    let node = ensure_runtime_node(app, &|_| {}).await?;
     let envs = crate::process_mgr::build_child_env(app, envs)?;
     let mut all = vec![script.to_string_lossy().into_owned()];
     all.extend_from_slice(args);
-    let cmd = app
-        .shell()
-        .sidecar("node")
-        .map_err(|e| format!("sidecar node 解析失败: {e}"))?;
-    let cmd = cmd.args(all).envs(envs);
+    let cmd = app.shell().command(&node).args(all).envs(envs);
     Ok(cmd)
 }
 
-/// 一次性执行并收集输出（用于 `npm view` 这类短命令）
-pub async fn run_npm(
+/// 一次性执行并收集输出（用于 `pnpm view` 这类短命令）
+pub async fn run_pnpm_view(
     app: &AppHandle,
     args: &[String],
     envs: &HashMap<String, String>,
 ) -> Result<(i32, String, String), String> {
-    let script = npm_cli_path(app)?;
-    let cmd = build_script_command(app, &script, args, envs)?;
-    let out = cmd.output().await.map_err(|e| format!("npm 执行失败: {e}"))?;
+    let script = pnpm_cli_path(app)?;
+    let cmd = build_script_command(app, &script, args, envs).await?;
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| format!("pnpm 执行失败: {e}"))?;
     let code = out.status.code().unwrap_or(-1);
     Ok((
         code,
@@ -102,7 +100,7 @@ pub async fn stream_pnpm<F: FnMut(String) + Send, G: FnMut(u64) + Send>(
     mut on_progress: G,
 ) -> Result<i32, String> {
     let script = pnpm_cli_path(app)?;
-    let cmd = build_script_command(app, &script, args, envs)?;
+    let cmd = build_script_command(app, &script, args, envs).await?;
     let (mut rx, _child) = cmd.spawn().map_err(|e| format!("pnpm 启动失败: {e}"))?;
     drop(_child); // 关闭 stdin（Windows 需要，避免挂起）
     let mut code = -1;

@@ -12,7 +12,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Tauri 2](https://img.shields.io/badge/Tauri-2.x-24c8db.svg)](https://tauri.app)
 [![平台](https://img.shields.io/badge/平台-macOS%20·%20Windows%20·%20Debian%20·%20RedHat-4c8bf5.svg)](#-下载安装)
-[![Node sidecar](https://img.shields.io/badge/sidecar-Node%20v26-339933.svg)](scripts/fetch-node.mjs)
+[![Node 按需加载](https://img.shields.io/badge/Node-按需下载%20v26-339933.svg)](docs/upgrade-design-v0.3.md)
 
 </div>
 
@@ -28,18 +28,19 @@
 | 🐋 | **三款内置插件** | 插件市场、小鲸鱼余额挂件、用量统计面板——开箱即用，面板一键开关 |
 | 🖥️ | **原生桌面体验** | 托盘驻留、关闭最小化、单实例、Dock 重新激活、崩溃自恢复 |
 | 🔒 | **安全边界** | 右键 Inspect 全面屏蔽；外部链接一律转系统浏览器；`--safe-mode` 故障恢复 |
-| 🇨🇳 | **零依赖开箱** | 用户无需安装 Node / pnpm / Git——运行时以 sidecar 随包携带，首次启动自动就绪 |
+| 🇨🇳 | **零依赖开箱** | 用户无需安装 Node / pnpm / Git——Node 运行时**按需加载**：系统 Node ≥24 优先，否则自动下载到应用数据目录（sha256 校验） |
 
 ## 🏗️ 架构：外壳与内核解耦
 
 ```
 ┌─ DSH-Cockpit（Tauri 2 外壳）───────────────────────────┐
-│  · 安装包仅含：外壳 + node sidecar + npm/pnpm 纯 JS 资源 │
+│  · 安装包仅含：外壳 + pnpm 纯 JS 资源（~30MB，无 Node） │
 │  · 不打包 @deepseek-ai/dsh（硬性约束）                   │
 └──────────────────────┬─────────────────────────────────┘
                        │ spawn（tauri-plugin-shell）
                        ▼
 ┌─ 隔离运行时（应用数据目录）──────────────────────────────┐
+│  node-runtime/ Node 按需加载（系统优先/缓存/下载+校验）  │
 │  dsh-env/     隔离 pnpm 环境（DSH 内核安装于此）          │
 │  dsh-home/    隔离 DSH_HOME（profile / 凭据 / 会话）     │
 │  pnpm-store/  内容寻址 store（更新秒级）                 │
@@ -90,7 +91,9 @@
 | `DSH_TAG` | DSH 内核版本 tag | `latest` |
 | `DSH_GIT_MIRROR` | GitHub 源插件的 git 镜像前缀（如 `https://ghfast.top/`） | 直连 |
 | `DSH_SAFE_MODE` | 设为 `1` 以安全模式启动 | 关 |
-| `DSH_NODE_VERSION` / `DSH_NODE_MIRROR` | 构建期：sidecar Node 版本 / 下载镜像 | `v26.5.0` / npmmirror |
+| `DSH_USE_SYSTEM_NODE` | 设为 `1` 强制使用系统 Node（需 ≥24） | 系统 Node 自动优先 |
+| `DSH_FORCE_NODE_DOWNLOAD` | 设为 `1` 强制走下载（调试/兜底） | 关 |
+| `DSH_NODE_MIRROR` | Node 下载镜像（国内自动 npmmirror） | `https://cdn.npmmirror.com/binaries/node` |
 
 > 鲸鱼挂件余额需在**隔离** home 的凭据文件（`<app_data>/dsh-home/.credentials.yaml`）配置 `DEEPSEEK_API_KEY`，与终端里的 `~/.dsh` 互不影响。
 
@@ -103,7 +106,9 @@ npx tauri build --bundles nsis      # Windows（需 Windows 机器）
 npx tauri build --bundles deb,rpm   # Linux（需 Linux 机器）
 ```
 
-`beforeBuildCommand` 会自动从镜像下载对应平台的 Node sidecar 并拆出 npm/pnpm 资源（幂等）。
+`beforeBuildCommand` 会自动从镜像下载 pnpm 纯 JS 资源到 `src-tauri/pnpm/`（幂等，已就绪即跳过）。
+
+> **Node 运行时为何不打包？** 安装包因此从 ~150MB 瘦身到 ~30MB。首次启动若检测到系统 Node ≥24 直接复用；否则自动从镜像下载 v26.5.0 到 `<app_data>/node-runtime/`（sha256 校验 + 断点续传 + 官方源兜底），仅首次需要联网。
 
 ## 🧠 桌面宿主能力
 
@@ -120,15 +125,15 @@ npx tauri build --bundles deb,rpm   # Linux（需 Linux 机器）
 ```text
 dsh-cockpit/
 ├── .github/workflows/build.yml   # 全平台一键构建
-├── scripts/fetch-node.mjs        # 构建期：下载 Node sidecar + 拆出 npm/pnpm 资源
+├── scripts/fetch-node.mjs        # 构建期：下载 pnpm 纯 JS 资源（幂等）
 ├── src/                          # 前端（无框架静态页）
 └── src-tauri/                    # Tauri 2 外壳（Rust）
-    ├── binaries/  npm/  pnpm/    # 构建产物（sidecar 与资源，不提交）
+    ├── pnpm/                     # 构建产物（pnpm 资源，不提交）
     └── src/
         ├── lib.rs                # 入口、窗口、托盘、菜单、更新检查
         ├── dsh.rs                # DSH 内核管理：安装/更新/回退/冒烟/插件开关
-        ├── npm.rs                # 经 sidecar node 执行 npm/pnpm
-        ├── process_mgr.rs        # 子进程生命周期 + 端口探测
+        ├── npm.rs                # 经运行时 node 执行 pnpm
+        ├── process_mgr.rs        # 子进程生命周期 + 端口探测 + Node 按需加载
         └── commands.rs           # 控制面板 IPC
 ```
 

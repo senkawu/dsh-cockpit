@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "dsh-desktop 默认能力：两个窗口 + 所需插件权限",
+  "description": "DSH-Cockpit 默认能力：三个窗口 + 所需插件权限（Node 子进程全部由 Rust 侧 spawn，不经前端 shell API）",
   "windows": ["main", "panel", "logs"],
   "permissions": [
     "core:default",
@@ -13,15 +13,6 @@
     "core:window:allow-unminimize",
     "dialog:default",
     "log:default",
-    "updater:default",
-    {
-      "identifier": "shell:allow-execute",
-      "allow": [{ "name": "node", "sidecar": true }]
-    },
-    {
-      "identifier": "shell:allow-spawn",
-      "allow": [{ "name": "node", "sidecar": true }]
-    },
-    "shell:allow-kill"
+    "updater:default"
   ]
 }

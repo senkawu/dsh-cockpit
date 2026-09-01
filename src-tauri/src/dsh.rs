@@ -91,6 +91,7 @@ pub struct StatusPayload {
     pub skipped_version: Option<String>,
     pub log_dir: String,
     pub app_version: String,
+    pub node_runtime: String,       // Node 运行时路径（系统/缓存/下载解析后）
     pub home_mode: String,          // "isolated" | "system"
     pub system_home: String,        // 系统 ~/.dsh 路径
     pub sync_credentials: bool,
@@ -246,14 +247,19 @@ impl DshManager {
         std::fs::write(self.env_dir.join("pnpm-workspace.yaml"), workspace).ok();
     }
 
-    /// 查询 npm 官方源上的最新版本
+    /// 查询 npm 源上的最新版本（pnpm view）
     pub async fn latest_version(&self, app: &AppHandle) -> Result<String, String> {
-        let args = vec!["view".into(), DSH_PACKAGE.to_string(), "version".into()];
-        let (code, stdout, stderr) = npm::run_npm(app, &args, &self.npm_envs()).await?;
+        let args = vec![
+            "view".into(),
+            DSH_PACKAGE.to_string(),
+            "version".into(),
+            format!("--config.registry={}", self.registry),
+        ];
+        let (code, stdout, stderr) = npm::run_pnpm_view(app, &args, &self.npm_envs()).await?;
         if code != 0 {
-            return Err(format!("npm view 失败(code={code}): {}", stderr.trim()));
+            return Err(format!("pnpm view 失败(code={code}): {}", stderr.trim()));
         }
-        // `npm view xxx version` 可能输出多行（多版本时取最后一行）
+        // `pnpm view xxx version` 可能输出多行（多版本时取最后一行）
         Ok(stdout.trim().lines().last().unwrap_or("").trim().to_string())
     }
 
@@ -832,6 +838,9 @@ impl DshManager {
             skipped_version: self.skipped_version.lock().unwrap().clone(),
             log_dir: self.log_dir.to_string_lossy().into_owned(),
             app_version: String::new(), // 由 commands::get_status 用 package_info 填充
+            node_runtime: crate::process_mgr::runtime_node_cached()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
             home_mode: if self.use_system_home.load(Ordering::Relaxed) { "system".into() } else { "isolated".into() },
             system_home: self.system_home_exists().then(|| {
                 std::env::var("DSH_HOME").unwrap_or_else(|_| {
@@ -967,11 +976,11 @@ impl DshManager {
     }
 
     /// 确保 pnpm 可执行 shim（dsh plugin 命令按 PATH 找 pnpm）。
-    /// shim 指向 bundled node + bundled pnpm.cjs，用户机器无需预装 pnpm。
-    fn ensure_pnpm_shim(&self, app: &AppHandle) -> Result<PathBuf, String> {
+    /// shim 指向运行时 node（P3：系统/缓存/按需下载）+ bundled pnpm.cjs，用户机器无需预装 pnpm。
+    async fn ensure_pnpm_shim(&self, app: &AppHandle) -> Result<PathBuf, String> {
         let bin_dir = self.data_dir.join("bin");
         std::fs::create_dir_all(&bin_dir).map_err(|e| e.to_string())?;
-        let node = crate::process_mgr::sidecar_node_path()?;
+        let node = crate::process_mgr::ensure_runtime_node(app, &|_| {}).await?;
         let pnpm_cjs = crate::npm::pnpm_cli_path(app)?;
         let shim = bin_dir.join(if cfg!(windows) { "pnpm.cmd" } else { "pnpm" });
         let content = if cfg!(windows) {
@@ -1011,7 +1020,7 @@ impl DshManager {
         }
 
         let bin = self.dsh_bin().ok_or("dsh 未安装")?;
-        let shim_dir = self.ensure_pnpm_shim(app)?;
+        let shim_dir = self.ensure_pnpm_shim(app).await?;
         let mut envs = self.dsh_envs();
         // PATH 显式构造：shim + 系统目录 + 继承值。
         // GUI 应用（尤其 Finder/托盘启动）PATH 很精简，pnpm 解析 github: 源需要 git(/usr/bin)。

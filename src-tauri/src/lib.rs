@@ -31,7 +31,7 @@ use log::{error, info, warn};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::webview::NewWindowResponse;
-use tauri::{Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogResult};
 use tauri_plugin_log::{Target, TargetKind};
 
@@ -444,6 +444,21 @@ async fn bootstrap(app: tauri::AppHandle) {
         let state = app.state::<DshManager>();
         state.inner().clone()
     };
+
+    // 0) 解析运行时 Node（P3：系统 ≥24 优先 → 缓存 → 按需下载 + sha256 校验 + 进度事件）
+    manager.emit_status(&app, "preparing", "正在准备 Node 运行时…", None);
+    let app_prog = app.clone();
+    match crate::process_mgr::ensure_runtime_node(&app, &move |line| {
+        let _ = app_prog.emit("dsh-update-progress", line);
+    })
+    .await
+    {
+        Ok(node) => info!("Node 运行时就绪：{}", node.display()),
+        Err(e) => {
+            manager.emit_status(&app, "error", &format!("Node 运行时准备失败：{e}"), None);
+            return;
+        }
+    }
 
     if manager.safe_mode.load(Ordering::Relaxed) {
         info!("安全模式：仅官方核心 bundle，跳过插件安装与更新检查");
